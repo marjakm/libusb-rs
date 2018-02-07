@@ -52,7 +52,10 @@ pub enum Error {
     NotSupported,
 
     /// Other error.
-    Other
+    Other,
+
+    /// Custom error, with message
+    Custom(String),
 }
 
 impl Error {
@@ -73,13 +76,18 @@ impl Error {
             Error::NoMem        => "Insufficient memory",
             Error::NotSupported => "Operation not supported or unimplemented on this platform",
             Error::Other        => "Other error",
+            Error::Custom(_)    => "Custom error",
         }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> StdResult<(), fmt::Error> {
-        fmt.write_str(self.strerror())
+        fmt.write_str(self.strerror())?;
+        if let Error::Custom(ref m) = *self {
+            write!(fmt, ", {}", m)?;
+        }
+        Ok(())
     }
 }
 
@@ -89,6 +97,11 @@ impl StdError for Error {
     }
 }
 
+impl<T: Into<String>> From<T> for Error {
+    fn from(t: T) -> Self {
+        Error::Custom(t.into())
+    }
+}
 
 #[doc(hidden)]
 pub fn from_libusb(err: c_int) -> Error {

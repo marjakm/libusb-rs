@@ -16,13 +16,13 @@ use fields::{Direction, RequestType, Recipient, request_type};
 use language::Language;
 
 /// A handle to an open USB device.
-pub struct DeviceHandle<'a> {
-    _context: PhantomData<&'a Context>,
+pub struct DeviceHandle<'ctx, Io: 'static> {
+    _context: PhantomData<&'ctx Context<Io>>,
     handle: *mut libusb_device_handle,
     interfaces: BitSet,
 }
 
-impl<'a> Drop for DeviceHandle<'a> {
+impl<'ctx, Io> Drop for DeviceHandle<'ctx, Io> {
     /// Closes the device.
     fn drop(&mut self) {
         unsafe {
@@ -35,10 +35,10 @@ impl<'a> Drop for DeviceHandle<'a> {
     }
 }
 
-unsafe impl<'a> Send for DeviceHandle<'a> {}
-unsafe impl<'a> Sync for DeviceHandle<'a> {}
+unsafe impl<'ctx, Io> Send for DeviceHandle<'ctx, Io> {}
+unsafe impl<'ctx, Io> Sync for DeviceHandle<'ctx, Io> {}
 
-impl<'a> DeviceHandle<'a> {
+impl<'ctx, Io> DeviceHandle<'ctx, Io> {
     /// Returns the active configuration number.
     pub fn active_configuration(&self) -> ::Result<u8> {
         let mut config = unsafe { mem::uninitialized() };
@@ -494,7 +494,7 @@ impl<'a> DeviceHandle<'a> {
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'a>(context: PhantomData<&'a Context>, handle: *mut libusb_device_handle) -> DeviceHandle<'a> {
+pub unsafe fn from_libusb<'ctx, Io>(context: PhantomData<&'ctx Context<Io>>, handle: *mut libusb_device_handle) -> DeviceHandle<'ctx, Io> {
     DeviceHandle {
         _context: context,
         handle: handle,

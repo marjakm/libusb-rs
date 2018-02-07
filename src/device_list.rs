@@ -7,13 +7,13 @@ use context::Context;
 use device::{self, Device};
 
 /// A list of detected USB devices.
-pub struct DeviceList<'a> {
-    context: PhantomData<&'a Context>,
+pub struct DeviceList<'ctx, Io: 'static> {
+    context: PhantomData<&'ctx Context<Io>>,
     list: *const *mut libusb_device,
     len: usize,
 }
 
-impl<'a> Drop for DeviceList<'a> {
+impl<'ctx, Io> Drop for DeviceList<'ctx, Io> {
     /// Frees the device list.
     fn drop(&mut self) {
         unsafe {
@@ -22,7 +22,7 @@ impl<'a> Drop for DeviceList<'a> {
     }
 }
 
-impl<'a> DeviceList<'a> {
+impl<'ctx, Io> DeviceList<'ctx, Io> {
     /// Returns the number of devices in the list.
     pub fn len(&self) -> usize {
         self.len
@@ -31,7 +31,7 @@ impl<'a> DeviceList<'a> {
     /// Returns an iterator over the devices in the list.
     ///
     /// The iterator yields a sequence of `Device` objects.
-    pub fn iter<'b>(&'b self) -> Devices<'a, 'b> {
+    pub fn iter<'dl>(&'dl self) -> Devices<'ctx, 'dl, Io> {
         Devices {
             context: self.context,
             devices: unsafe { slice::from_raw_parts(self.list, self.len) },
@@ -41,16 +41,16 @@ impl<'a> DeviceList<'a> {
 }
 
 /// Iterator over detected USB devices.
-pub struct Devices<'a, 'b> {
-    context: PhantomData<&'a Context>,
-    devices: &'b [*mut libusb_device],
+pub struct Devices<'ctx, 'dl, Io: 'static> {
+    context: PhantomData<&'ctx Context<Io>>,
+    devices: &'dl [*mut libusb_device],
     index: usize,
 }
 
-impl<'a, 'b> Iterator for Devices<'a, 'b> {
-    type Item = Device<'a>;
+impl<'ctx, 'dl, Io> Iterator for Devices<'ctx, 'dl, Io> {
+    type Item = Device<'ctx, Io>;
 
-    fn next(&mut self) -> Option<Device<'a>> {
+    fn next(&mut self) -> Option<Device<'ctx, Io>> {
         if self.index < self.devices.len() {
             let device = self.devices[self.index];
 
@@ -70,7 +70,7 @@ impl<'a, 'b> Iterator for Devices<'a, 'b> {
 
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'a>(_context: &'a Context, list: *const *mut libusb_device, len: usize,) -> DeviceList<'a> {
+pub unsafe fn from_libusb<'ctx, Io>(_context: &'ctx Context<Io>, list: *const *mut libusb_device, len: usize,) -> DeviceList<'ctx, Io> {
     DeviceList {
         context: PhantomData,
         list: list,

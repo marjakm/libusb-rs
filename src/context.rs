@@ -4,16 +4,18 @@ use std::mem;
 use libc::c_int;
 use libusb::*;
 
+use ::IoType;
 use device_list::{self, DeviceList};
 use device_handle::{self, DeviceHandle};
 use error;
 
 /// A `libusb` context.
-pub struct Context {
+pub struct Context<Io> {
     context: *mut libusb_context,
+    io: Io,
 }
 
-impl Drop for Context {
+impl<Io> Drop for Context<Io> {
     /// Closes the `libusb` context.
     fn drop(&mut self) {
         unsafe {
@@ -22,17 +24,17 @@ impl Drop for Context {
     }
 }
 
-unsafe impl Sync for Context {}
-unsafe impl Send for Context {}
+unsafe impl<Io> Sync for Context<Io> {}
+unsafe impl<Io> Send for Context<Io> {}
 
-impl Context {
+impl<Io: IoType> Context<Io> {
     /// Opens a new `libusb` context.
     pub fn new() -> ::Result<Self> {
         let mut context = unsafe { mem::uninitialized() };
 
         try_unsafe!(libusb_init(&mut context));
 
-        Ok(Context { context: context })
+        Ok(Context { context: context, io: Io::new() })
     }
 
     /// Sets the log level of a `libusb` context.
@@ -70,7 +72,7 @@ impl Context {
     }
 
     /// Returns a list of the current USB devices. The context must outlive the device list.
-    pub fn devices<'a>(&'a self) -> ::Result<DeviceList<'a>> {
+    pub fn devices<'ctx>(&'ctx self) -> ::Result<DeviceList<'ctx, Io>> {
         let mut list: *const *mut libusb_device = unsafe { mem::uninitialized() };
 
         let n = unsafe { libusb_get_device_list(self.context, &mut list) };
@@ -91,7 +93,7 @@ impl Context {
     ///
     /// Returns a device handle for the first device found matching `vendor_id` and `product_id`.
     /// On error, or if the device could not be found, it returns `None`.
-    pub fn open_device_with_vid_pid<'a>(&'a self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'a>> {
+    pub fn open_device_with_vid_pid<'ctx>(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'ctx, Io>> {
         let handle = unsafe { libusb_open_device_with_vid_pid(self.context, vendor_id, product_id) };
 
         if handle.is_null() {
@@ -99,6 +101,118 @@ impl Context {
         }
         else {
             Some(unsafe { device_handle::from_libusb(PhantomData, handle) })
+        }
+    }
+}
+
+mod async_io {
+    use std::io;
+    use std::ptr;
+    use std::slice;
+    use std::os::unix::io::RawFd;
+    use std::thread::sleep;
+    use std::time::Duration;
+    use mio::event::Evented;
+    use mio::unix::EventedFd;
+    use mio::{Poll, Token, Ready, PollOpt};
+    use libc::{POLLIN, POLLOUT};
+    use libusb::*;
+
+    use ::async_io::{AsyncIo};
+    use ::error::from_libusb;
+    use super::Context;
+
+    impl Context<AsyncIo> {
+        pub fn handle(&self, poll: &Poll) -> ::Result<()> {
+            let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
+            match (*ir).as_mut() {
+                None => return Err("Register in Poll before calling handle".into()),
+                Some(ofds) => {
+                    let res = match unsafe { libusb_handle_events_locked(self.context, ptr::null()) } {
+                        0 => Ok(()),
+                        e => Err(from_libusb(e))
+                    };
+                    if unsafe { libusb_event_handling_ok(self.context) } == 0 {
+                        unsafe { libusb_unlock_events(self.context) };
+                        self.spin_until_locked_and_ok_to_handle_events();
+                    }
+                    let fds = self.get_pollfd_list();
+                    if ofds.1 != fds {
+                        for &(ref fd, _) in ofds.1.iter() {
+                            poll.deregister(&EventedFd(fd)).map_err(|e| e.to_string())?;
+                        }
+                        for &(ref fd, ref rdy) in fds.iter() {
+                            poll.register(&EventedFd(fd), ofds.0, *rdy, PollOpt::level()).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    ofds.1 = fds;
+                    res
+                }
+            }
+        }
+
+        fn get_pollfd_list(&self) -> Vec<(RawFd, Ready)> {
+            let pfdl = unsafe { libusb_get_pollfds(self.context) };
+            let mut v = Vec::new();
+            let sl: &[*mut libusb_pollfd] = unsafe { slice::from_raw_parts(pfdl, 1024) };
+            while let Some(x) = sl.iter().next() {
+                if *x == ptr::null_mut() { break; }
+                let pfd = unsafe { &**x as &libusb_pollfd };
+                let mut rdy = Ready::empty();
+                if (pfd.events & POLLIN ) != 0 { rdy = rdy | Ready::readable(); }
+                if (pfd.events & POLLOUT) != 0 { rdy = rdy | Ready::writable(); }
+                v.push((pfd.fd, rdy));
+            }
+            unsafe { libusb_free_pollfds(pfdl) };
+            v.sort();
+            v
+        }
+
+        fn spin_until_locked_and_ok_to_handle_events(&self) {
+            'retry: loop {
+                if unsafe { libusb_try_lock_events(self.context) } == 0 {
+                    // got lock
+                    if unsafe { libusb_event_handling_ok(self.context) } == 0 {
+                        unsafe { libusb_unlock_events(self.context) };
+                        warn!("libusb_event_handling_ok returned not ok, busy wait until ok (with 10ms sleep)");
+                        sleep(Duration::from_millis(10));
+                        continue 'retry;
+                    }
+                    break
+                } else {
+                    warn!("could not get events lock with libusb_try_lock_events, busy wait until ok (with 10ms sleep)");
+                    sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    impl Evented for Context<AsyncIo> {
+        fn register(&self, poll: &Poll, token: Token, _interest: Ready, _opts: PollOpt) -> io::Result<()> {
+            let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
+            if ir.is_some() { panic!("It is not safe to register libusb file descriptors multiple times") }
+            self.spin_until_locked_and_ok_to_handle_events();
+            let fds = self.get_pollfd_list();
+            for &(ref fd, ref rdy) in fds.iter() {
+                poll.register(&EventedFd(fd), token, *rdy, PollOpt::level())?;
+            }
+            *ir = Some((token, fds));
+            Ok(())
+        }
+
+        fn reregister(&self, poll: &Poll, token: Token, interest: Ready, _opts: PollOpt) -> io::Result<()> {
+            self.deregister(poll)?;
+            self.register(poll, token, interest, PollOpt::level())
+        }
+
+        fn deregister(&self, poll: &Poll) -> io::Result<()> {
+            let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
+            match ir.take() {
+                Some((_, fds)) => for (fd, _) in fds.into_iter() { poll.deregister(&EventedFd(&fd))?; },
+                None => panic!("Unable to deregister libusb file descriptors when they are not registered")
+            }
+            unsafe { libusb_unlock_events(self.context) };
+            Ok(())
         }
     }
 }
