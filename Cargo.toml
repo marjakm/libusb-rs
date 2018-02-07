@@ -11,9 +11,6 @@ readme = "README.md"
 keywords = ["usb", "libusb", "hardware", "bindings"]
 
 [dependencies]
-bit-set = "0.2.0"
+bit-set = "0.4"
 libusb-sys = "0.2.3"
 libc = "0.2"
-
-[dev-dependencies]
-regex = "0.1.26"
