@@ -17,8 +17,8 @@ pub use endpoint_descriptor::EndpointDescriptor;
 pub use language::{Language, PrimaryLanguage, SubLanguage};
 
 pub use context::LogLevel;
-pub use device_handle_api::{DeviceHandleSyncApi, DeviceHandleAsyncApi};
-pub use io::IoType;
+pub use device_handle_api::DeviceHandleSyncApi;
+pub use io::*;
 pub use io::sync::*; //TODO: For backwards compatability, maybe remove?
 
 

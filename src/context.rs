@@ -1,6 +1,4 @@
-use std::marker::PhantomData;
 use std::mem;
-
 use libc::c_int;
 use libusb::*;
 
@@ -12,7 +10,7 @@ use error;
 /// A `libusb` context.
 pub struct Context<Io> {
     context: *mut libusb_context,
-    io: Io,
+    pub io: Io,
 }
 
 impl<Io> Drop for Context<Io> {
@@ -100,7 +98,7 @@ impl<Io: IoType> Context<Io> {
             None
         }
         else {
-            Some(unsafe { device_handle::from_libusb(PhantomData, handle) })
+            Some(unsafe { device_handle::from_libusb(self, handle) })
         }
     }
 }

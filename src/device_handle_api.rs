@@ -1,5 +1,4 @@
 pub use self::sync_api::DeviceHandleSyncApi;
-pub use self::async_api::DeviceHandleAsyncApi;
 
 
 mod sync_api {
@@ -116,10 +115,5 @@ mod sync_api {
                 Some(n) => self.read_string_descriptor(language, n, timeout)
             }
         }
-    }
-}
-
-mod async_api {
-    pub trait DeviceHandleAsyncApi {
     }
 }

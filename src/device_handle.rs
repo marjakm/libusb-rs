@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::mem;
 
 use bit_set::BitSet;
@@ -11,7 +10,7 @@ use error;
 
 /// A handle to an open USB device.
 pub struct DeviceHandle<'ctx, Io: 'static> {
-    _context: PhantomData<&'ctx Context<Io>>,
+    context: &'ctx Context<Io>,
     handle: *mut libusb_device_handle,
     interfaces: BitSet,
 }
@@ -108,6 +107,47 @@ impl<'ctx, Io> DeviceHandle<'ctx, Io> {
         try_unsafe!(libusb_set_interface_alt_setting(self.handle, iface as c_int, setting as c_int));
         Ok(())
     }
+}
+
+mod async_api {
+    use std::time::Duration;
+    use libc::c_uint;
+    use libusb::*;
+    use io::{TransferBuilderType, AsyncIoType};
+    use super::DeviceHandle;
+
+    macro_rules! fcsm { ($e:expr;$($v:expr),*) => {unsafe{libusb_fill_control_setup($($v),*)}};  (;$($v:expr),*) => {}; }
+    macro_rules! tb {
+        ($( $fn_nam:ident {$($var:ident : $typ:ty),*} $fill:ident  {$($v1:ident),*} {$($len:ident),*} {$($nip:ident),*} {$($znip:expr),*} {$($fcs:expr),*} )*) => {
+
+            impl<'ctx, Io> DeviceHandle<'ctx, Io>
+                where Io: AsyncIoType<'ctx>
+            {$(
+                #[allow(non_snake_case)]
+                pub fn $fn_nam<TBF, F>(self, mut buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> <Io as AsyncIoType<'ctx>>::Transfer
+                    where TBF: Into<Box<F>>,
+                            F: Fn(<Io as AsyncIoType<'ctx>>::TransferCbData) -> <Io as AsyncIoType<'ctx>>::TransferCbRes,
+                           Io: AsyncIoType<'ctx>
+                {
+                    let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
+                    let io = &self.context.io;
+                    let (tb, cb, ud) = io.allocate(callback);
+                    let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
+                    unsafe { $fill(tr, self.handle, $($v1,)* buf.as_mut_ptr(), $(buf.$len() as i32,)* $($nip,)* cb, ud, timeout_ms); }
+                    fcsm!($($fcs),* ; buf.as_mut_ptr(), $($var),*);
+                    tb.submit()
+                }
+            )*}
+        }
+    }
+
+    tb!(control      {bmRequestType: u8, bRequest: u8, wValue: u16, wIndex: u16 , wLength: u16}   libusb_fill_control_transfer     {}                     {}     {}                 {0} {0}
+        isochronous  {endpoint: u8, num_iso_packets: i32 }                                        libusb_fill_iso_transfer         {endpoint}             {len}  {num_iso_packets}  {}  {}
+        interrupt    {endpoint: u8 }                                                              libusb_fill_interrupt_transfer   {endpoint}             {len}  {}                 {0} {}
+        bulk         {endpoint: u8 }                                                              libusb_fill_bulk_transfer        {endpoint}             {len}  {}                 {0} {}
+        bulk_stream  {endpoint: u8, stream_id: u32 }                                              libusb_fill_bulk_stream_transfer {endpoint, stream_id}  {len}  {}                 {0} {}
+    );
+
 }
 
 mod sync_io {
@@ -408,9 +448,9 @@ mod sync_io {
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'ctx, Io>(context: PhantomData<&'ctx Context<Io>>, handle: *mut libusb_device_handle) -> DeviceHandle<'ctx, Io> {
+pub unsafe fn from_libusb<'ctx, Io>(context: &'ctx Context<Io>, handle: *mut libusb_device_handle) -> DeviceHandle<'ctx, Io> {
     DeviceHandle {
-        _context: context,
+        context: context,
         handle: handle,
         interfaces: BitSet::with_capacity(u8::max_value() as usize + 1),
     }

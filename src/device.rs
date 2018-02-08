@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::mem;
 
 use libusb::*;
@@ -12,7 +11,7 @@ use fields::{self, Speed};
 
 /// A reference to a USB device.
 pub struct Device<'ctx, Io: 'static> {
-    context: PhantomData<&'ctx Context<Io>>,
+    context: &'ctx Context<Io>,
     device: *mut libusb_device,
 }
 
@@ -89,7 +88,7 @@ impl<'ctx, Io> Device<'ctx, Io> {
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'ctx, Io>(context: PhantomData<&'ctx Context<Io>>, device: *mut libusb_device) -> Device<'ctx, Io> {
+pub unsafe fn from_libusb<'ctx, Io>(context: &'ctx Context<Io>, device: *mut libusb_device) -> Device<'ctx, Io> {
     libusb_ref_device(device);
 
     Device {
