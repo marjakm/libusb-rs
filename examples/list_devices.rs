@@ -1,4 +1,5 @@
 extern crate libusb;
+use libusb::DeviceHandleSyncApi;
 
 use std::time::Duration;
 

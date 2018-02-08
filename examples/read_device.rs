@@ -1,4 +1,5 @@
 extern crate libusb;
+use libusb::DeviceHandleSyncApi;
 
 use std::slice;
 use std::str::FromStr;

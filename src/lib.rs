@@ -17,7 +17,9 @@ pub use endpoint_descriptor::EndpointDescriptor;
 pub use language::{Language, PrimaryLanguage, SubLanguage};
 
 pub use context::LogLevel;
-pub use sync_io::*;
+pub use device_handle_api::{DeviceHandleSyncApi, DeviceHandleAsyncApi};
+pub use io::IoType;
+pub use io::sync::*; //TODO: For backwards compatability, maybe remove?
 
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ mod context;
 mod device_list;
 mod device;
 mod device_handle;
+mod device_handle_api;
 
 mod fields;
 mod device_descriptor;
@@ -39,56 +42,4 @@ mod config_descriptor;
 mod interface_descriptor;
 mod endpoint_descriptor;
 mod language;
-
-
-pub trait IoType: 'static {
-    fn new() -> Self;
-}
-
-pub mod generic_io {
-    pub use ::context::Context;
-    pub use ::device_list::{DeviceList, Devices};
-    pub use ::device::Device;
-    pub use ::device_handle::DeviceHandle;
-}
-
-pub mod sync_io {
-    type Io = SyncIo;
-    pub type Context = ::context::Context<Io>;
-    pub type DeviceList<'ctx> = ::device_list::DeviceList<'ctx, Io>;
-    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, Io>;
-    pub type Device<'ctx> = ::device::Device<'ctx, Io>;
-    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, Io>;
-
-    use ::IoType;
-    pub struct SyncIo;
-    impl IoType for  SyncIo {
-        fn new() -> Self { SyncIo }
-    }
-}
-
-pub mod async_io {
-    type Io = AsyncIo;
-    pub type Context = ::context::Context<Io>;
-    pub type DeviceList<'ctx> = ::device_list::DeviceList<'ctx, Io>;
-    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, Io>;
-    pub type Device<'ctx> = ::device::Device<'ctx, Io>;
-    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, Io>;
-
-    use std::sync::Mutex;
-    use std::os::unix::io::RawFd;
-    use mio::{Ready, Token};
-    use ::IoType;
-
-    pub struct AsyncIo {
-        pub reg: Mutex<Option<(Token, Vec<(RawFd, Ready)>)>>,
-    }
-
-    impl IoType for AsyncIo {
-        fn new() -> Self {
-            AsyncIo {
-                reg: Mutex::new(None)
-            }
-        }
-    }
-}
+pub mod io;

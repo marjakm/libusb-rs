@@ -34,7 +34,7 @@ impl<Io: IoType> Context<Io> {
 
         try_unsafe!(libusb_init(&mut context));
 
-        Ok(Context { context: context, io: Io::new() })
+        Ok(Context { io: Io::new(context), context: context })
     }
 
     /// Sets the log level of a `libusb` context.
@@ -105,6 +105,7 @@ impl<Io: IoType> Context<Io> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod async_io {
     use std::io;
     use std::ptr;
@@ -118,7 +119,7 @@ mod async_io {
     use libc::{POLLIN, POLLOUT};
     use libusb::*;
 
-    use ::async_io::{AsyncIo};
+    use ::io::async::AsyncIo;
     use ::error::from_libusb;
     use super::Context;
 
