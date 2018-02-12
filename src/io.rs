@@ -37,8 +37,18 @@ impl From<i32> for TransferStatus {
     }
 }
 
-pub trait IoType: 'static {
+pub trait IoType
+    where Self: 'static,
+          for<'io> &'io Self: IoRefType
+{
     fn new(ctx: *mut libusb_context) -> Self;
+}
+
+// I want zero sized references and handle probably contains a ref
+// https://github.com/rust-lang/rfcs/pull/2040
+pub trait IoRefType: Clone {
+    type Handle;
+    fn handle(&self) -> Self::Handle;
 }
 
 pub trait TransferBuilderType {
@@ -70,30 +80,34 @@ pub mod generic {
 }
 
 pub mod sync {
-    type Io = SyncIo;
-    pub type Context = ::context::Context<Io>;
-    pub type DeviceList<'ctx> = ::device_list::DeviceList<'ctx, Io>;
-    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, Io>;
-    pub type Device<'ctx> = ::device::Device<'ctx, Io>;
-    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, Io>;
+    pub type Context = ::context::Context<SyncIo>;
+    pub type DeviceList<'ctx> = ::device_list::DeviceList<'ctx, SyncIo, ()>;
+    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, SyncIo, ()>;
+    pub type Device<'ctx> = ::device::Device<'ctx, SyncIo, ()>;
+    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, SyncIo, ()>;
 
-    use ::IoType;
+    use super::{IoType, IoRefType};
     use libusb::libusb_context;
 
     pub struct SyncIo;
-    impl IoType for  SyncIo {
+
+    impl IoType for SyncIo {
         fn new(_ctx: *mut libusb_context) -> Self { SyncIo }
+    }
+
+    impl<'ctx> IoRefType for &'ctx SyncIo {
+        type Handle = ();
+        fn handle(&self) -> Self::Handle { }
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod async {
-    type Io = AsyncIo;
-    pub type Context = ::context::Context<Io>;
-    pub type DeviceList<'ctx> = ::device_list::DeviceList<'ctx, Io>;
-    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, Io>;
-    pub type Device<'ctx> = ::device::Device<'ctx, Io>;
-    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, Io>;
+    pub type Context = ::context::Context<AsyncIo>;
+    pub type DeviceList<'ctx> = ::device_list::DeviceList<'ctx, AsyncIo, &'ctx AsyncIo>;
+    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, AsyncIo, &'ctx AsyncIo>;
+    pub type Device<'ctx> = ::device::Device<'ctx, AsyncIo, &'ctx AsyncIo>;
+    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, AsyncIo, &'ctx AsyncIo>;
 
     use std::ptr;
     use std::sync::Mutex;
@@ -121,9 +135,14 @@ pub mod async {
         }
     }
 
-    impl<'ctx, 'io> AsyncIoType<'ctx> for &'io AsyncIo {
-        type TransferBuilder = AsyncIoTransferBuilder<'io>;
-        type Transfer = AsyncIoTransfer<'io>;
+    impl<'ctx> IoRefType for &'ctx AsyncIo {
+        type Handle = &'ctx AsyncIo;
+        fn handle(&self) -> Self::Handle { self }
+    }
+
+    impl<'ctx> AsyncIoType<'ctx> for &'ctx AsyncIo {
+        type TransferBuilder = AsyncIoTransferBuilder<'ctx>;
+        type Transfer = AsyncIoTransfer<'ctx>;
         type TransferCbData = ();
         type TransferCbRes = ();
 
@@ -135,21 +154,23 @@ pub mod async {
         }
     }
 
-    pub struct AsyncIoTransferBuilder<'io> {
-        _io: &'io AsyncIo
+    pub struct AsyncIoTransferBuilder<'ctx> {
+        _io: &'ctx AsyncIo
     }
-    impl<'io> TransferBuilderType for AsyncIoTransferBuilder<'io> {
-        type Transfer = AsyncIoTransfer<'io>;
+
+    impl<'ctx> TransferBuilderType for AsyncIoTransferBuilder<'ctx> {
+        type Transfer = AsyncIoTransfer<'ctx>;
         fn submit(self) -> Self::Transfer {
             let _t = AsyncIoTransfer { _io: self._io };
             unimplemented!()
         }
     }
 
-    pub struct AsyncIoTransfer<'io> {
-        _io: &'io AsyncIo
+    pub struct AsyncIoTransfer<'ctx> {
+        _io: &'ctx AsyncIo
     }
-    impl<'io> TransferType for AsyncIoTransfer<'io> {
+
+    impl<'ctx> TransferType for AsyncIoTransfer<'ctx> {
         fn cancel(&self) -> ::Result<()> { unimplemented!() }
         fn status(&self) -> TransferStatus { unimplemented!() }
     }

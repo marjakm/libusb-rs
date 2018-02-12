@@ -1,8 +1,9 @@
+use std::marker::PhantomData;
 use std::mem;
 use libc::c_int;
 use libusb::*;
 
-use ::IoType;
+use io::{IoType, IoRefType};
 use device_list::{self, DeviceList};
 use device_handle::{self, DeviceHandle};
 use error;
@@ -10,7 +11,7 @@ use error;
 /// A `libusb` context.
 pub struct Context<Io> {
     context: *mut libusb_context,
-    pub io: Io,
+    io: Io,
 }
 
 impl<Io> Drop for Context<Io> {
@@ -25,7 +26,10 @@ impl<Io> Drop for Context<Io> {
 unsafe impl<Io> Sync for Context<Io> {}
 unsafe impl<Io> Send for Context<Io> {}
 
-impl<Io: IoType> Context<Io> {
+impl<Io> Context<Io>
+    where Io: IoType,
+          for<'io> &'io Io: IoRefType
+{
     /// Opens a new `libusb` context.
     pub fn new() -> ::Result<Self> {
         let mut context = unsafe { mem::uninitialized() };
@@ -70,7 +74,7 @@ impl<Io: IoType> Context<Io> {
     }
 
     /// Returns a list of the current USB devices. The context must outlive the device list.
-    pub fn devices<'ctx>(&'ctx self) -> ::Result<DeviceList<'ctx, Io>> {
+    pub fn devices<'ctx>(&'ctx self) -> ::Result<DeviceList<'ctx, Io, <&'ctx Io as IoRefType>::Handle>> {
         let mut list: *const *mut libusb_device = unsafe { mem::uninitialized() };
 
         let n = unsafe { libusb_get_device_list(self.context, &mut list) };
@@ -79,7 +83,7 @@ impl<Io: IoType> Context<Io> {
             Err(error::from_libusb(n as c_int))
         }
         else {
-            Ok(unsafe { device_list::from_libusb(self, list, n as usize) })
+            Ok(unsafe { device_list::from_libusb(self, (&self.io).handle(), list, n as usize) })
         }
     }
 
@@ -91,14 +95,14 @@ impl<Io: IoType> Context<Io> {
     ///
     /// Returns a device handle for the first device found matching `vendor_id` and `product_id`.
     /// On error, or if the device could not be found, it returns `None`.
-    pub fn open_device_with_vid_pid<'ctx>(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'ctx, Io>> {
+    pub fn open_device_with_vid_pid<'ctx>(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'ctx, Io, <&'ctx Io as IoRefType>::Handle>> {
         let handle = unsafe { libusb_open_device_with_vid_pid(self.context, vendor_id, product_id) };
 
         if handle.is_null() {
             None
         }
         else {
-            Some(unsafe { device_handle::from_libusb(self, handle) })
+            Some(unsafe { device_handle::from_libusb(PhantomData, (&self.io).handle(), handle) })
         }
     }
 }

@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::mem;
 
 use libusb::*;
@@ -10,12 +11,15 @@ use fields::{self, Speed};
 
 
 /// A reference to a USB device.
-pub struct Device<'ctx, Io: 'static> {
-    context: &'ctx Context<Io>,
+pub struct Device<'ctx, Io, IoRef>
+    where Io: 'static
+{
+    context: PhantomData<&'ctx Context<Io>>,
+    ioref: IoRef,
     device: *mut libusb_device,
 }
 
-impl<'ctx, Io> Drop for Device<'ctx, Io> {
+impl<'ctx, Io, IoRef> Drop for Device<'ctx, Io, IoRef> {
     /// Releases the device reference.
     fn drop(&mut self) {
         unsafe {
@@ -24,10 +28,12 @@ impl<'ctx, Io> Drop for Device<'ctx, Io> {
     }
 }
 
-unsafe impl<'ctx, Io> Send for Device<'ctx, Io> {}
-unsafe impl<'ctx, Io> Sync for Device<'ctx, Io> {}
+unsafe impl<'ctx, Io, IoRef> Send for Device<'ctx, Io, IoRef> {}
+unsafe impl<'ctx, Io, IoRef> Sync for Device<'ctx, Io, IoRef> {}
 
-impl<'ctx, Io> Device<'ctx, Io> {
+impl<'ctx, Io, IoRef> Device<'ctx, Io, IoRef>
+    where IoRef: Clone
+{
     /// Reads the device descriptor.
     pub fn device_descriptor(&self) -> ::Result<DeviceDescriptor> {
         let mut descriptor: libusb_device_descriptor = unsafe { mem::uninitialized() };
@@ -78,21 +84,22 @@ impl<'ctx, Io> Device<'ctx, Io> {
     }
 
     /// Opens the device.
-    pub fn open(&self) -> ::Result<DeviceHandle<'ctx, Io>> {
+    pub fn open(&self) -> ::Result<DeviceHandle<'ctx, Io, IoRef>> {
         let mut handle: *mut libusb_device_handle = unsafe { mem::uninitialized() };
 
         try_unsafe!(libusb_open(self.device, &mut handle));
 
-        Ok(unsafe { device_handle::from_libusb(self.context, handle) })
+        Ok(unsafe { device_handle::from_libusb(PhantomData, self.ioref.clone(), handle) })
     }
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'ctx, Io>(context: &'ctx Context<Io>, device: *mut libusb_device) -> Device<'ctx, Io> {
+pub unsafe fn from_libusb<'ctx, Io, IoRef>(context: PhantomData<&'ctx Context<Io>>, ioref: IoRef, device: *mut libusb_device) -> Device<'ctx, Io, IoRef> {
     libusb_ref_device(device);
 
     Device {
         context: context,
+        ioref: ioref,
         device: device,
     }
 }

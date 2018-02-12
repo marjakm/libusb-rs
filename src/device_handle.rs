@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::mem;
 
 use bit_set::BitSet;
@@ -9,13 +10,16 @@ use error;
 
 
 /// A handle to an open USB device.
-pub struct DeviceHandle<'ctx, Io: 'static> {
-    context: &'ctx Context<Io>,
+pub struct DeviceHandle<'ctx, Io, IoRef>
+    where Io: 'static
+{
+    context: PhantomData<&'ctx Context<Io>>,
+    ioref: IoRef,
     handle: *mut libusb_device_handle,
     interfaces: BitSet,
 }
 
-impl<'ctx, Io> Drop for DeviceHandle<'ctx, Io> {
+impl<'ctx, Io, IoRef> Drop for DeviceHandle<'ctx, Io, IoRef> {
     /// Closes the device.
     fn drop(&mut self) {
         unsafe {
@@ -28,10 +32,10 @@ impl<'ctx, Io> Drop for DeviceHandle<'ctx, Io> {
     }
 }
 
-unsafe impl<'ctx, Io> Send for DeviceHandle<'ctx, Io> {}
-unsafe impl<'ctx, Io> Sync for DeviceHandle<'ctx, Io> {}
+unsafe impl<'ctx, Io, IoRef> Send for DeviceHandle<'ctx, Io, IoRef> {}
+unsafe impl<'ctx, Io, IoRef> Sync for DeviceHandle<'ctx, Io, IoRef> {}
 
-impl<'ctx, Io> DeviceHandle<'ctx, Io> {
+impl<'ctx, Io, IoRef> DeviceHandle<'ctx, Io, IoRef> {
     /// Returns the active configuration number.
     pub fn active_configuration(&self) -> ::Result<u8> {
         let mut config = unsafe { mem::uninitialized() };
@@ -120,18 +124,17 @@ mod async_api {
     macro_rules! tb {
         ($( $fn_nam:ident {$($var:ident : $typ:ty),*} $fill:ident  {$($v1:ident),*} {$($len:ident),*} {$($nip:ident),*} {$($znip:expr),*} {$($fcs:expr),*} )*) => {
 
-            impl<'ctx, Io> DeviceHandle<'ctx, Io>
-                where Io: AsyncIoType<'ctx>
+            impl<'ctx, Io, IoRef> DeviceHandle<'ctx, Io, IoRef>
+                where IoRef: AsyncIoType<'ctx>
             {$(
                 #[allow(non_snake_case)]
-                pub fn $fn_nam<TBF, F>(self, mut buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> <Io as AsyncIoType<'ctx>>::Transfer
-                    where TBF: Into<Box<F>>,
-                            F: Fn(<Io as AsyncIoType<'ctx>>::TransferCbData) -> <Io as AsyncIoType<'ctx>>::TransferCbRes,
-                           Io: AsyncIoType<'ctx>
+                pub fn $fn_nam<TBF, F>(self, mut buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> <IoRef as AsyncIoType<'ctx>>::Transfer
+                    where   TBF: Into<Box<F>>,
+                              F: Fn(<IoRef as AsyncIoType<'ctx>>::TransferCbData) -> <IoRef as AsyncIoType<'ctx>>::TransferCbRes,
+                          IoRef: AsyncIoType<'ctx>
                 {
                     let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
-                    let io = &self.context.io;
-                    let (tb, cb, ud) = io.allocate(callback);
+                    let (tb, cb, ud) = self.ioref.allocate(callback);
                     let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
                     unsafe { $fill(tr, self.handle, $($v1,)* buf.as_mut_ptr(), $(buf.$len() as i32,)* $($nip,)* cb, ud, timeout_ms); }
                     fcsm!($($fcs),* ; buf.as_mut_ptr(), $($var),*);
@@ -162,7 +165,7 @@ mod sync_io {
     use super::DeviceHandle;
 
 
-    impl<'ctx> DeviceHandleSyncApi for DeviceHandle<'ctx, SyncIo> {
+    impl<'ctx, IoRef> DeviceHandleSyncApi for DeviceHandle<'ctx, SyncIo, IoRef> {
         /// Reads from an interrupt endpoint.
         ///
         /// This function attempts to read from the interrupt endpoint with the address given by the
@@ -448,9 +451,10 @@ mod sync_io {
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'ctx, Io>(context: &'ctx Context<Io>, handle: *mut libusb_device_handle) -> DeviceHandle<'ctx, Io> {
+pub unsafe fn from_libusb<'ctx, Io, IoRef>(context: PhantomData<&'ctx Context<Io>>, ioref: IoRef, handle: *mut libusb_device_handle) -> DeviceHandle<'ctx, Io, IoRef> {
     DeviceHandle {
         context: context,
+        ioref: ioref,
         handle: handle,
         interfaces: BitSet::with_capacity(u8::max_value() as usize + 1),
     }
