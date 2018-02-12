@@ -128,17 +128,16 @@ mod async_api {
                 where IoRef: AsyncIoType<'ctx>
             {$(
                 #[allow(non_snake_case)]
-                pub fn $fn_nam<TBF, F>(self, mut buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> <IoRef as AsyncIoType<'ctx>>::Transfer
-                    where   TBF: Into<Box<F>>,
-                              F: Fn(<IoRef as AsyncIoType<'ctx>>::TransferCbData) -> <IoRef as AsyncIoType<'ctx>>::TransferCbRes,
+                pub fn $fn_nam<TBF>(self, buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> ::Result<<IoRef as AsyncIoType<'ctx>>::TransferHandle>
+                    where   TBF: Into<Box<Fn(<IoRef as AsyncIoType<'ctx>>::TransferCbData) -> <IoRef as AsyncIoType<'ctx>>::TransferCbRes>>,
                           IoRef: AsyncIoType<'ctx>
                 {
                     let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
-                    let (tb, cb, ud) = self.ioref.allocate(callback);
+                    let ar = self.ioref.allocate(callback, buf);
                     let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
-                    unsafe { $fill(tr, self.handle, $($v1,)* buf.as_mut_ptr(), $(buf.$len() as i32,)* $($nip,)* cb, ud, timeout_ms); }
-                    fcsm!($($fcs),* ; buf.as_mut_ptr(), $($var),*);
-                    tb.submit()
+                    unsafe { $fill(tr, self.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
+                    fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);
+                    ar.builder.submit(tr)
                 }
             )*}
         }

@@ -1,5 +1,5 @@
-use libc::c_void;
-use libusb::{self, libusb_transfer_cb_fn, libusb_context};
+use libc::{c_uchar, c_void};
+use libusb::{self, libusb_transfer, libusb_transfer_cb_fn, libusb_context};
 
 
 /// The status of a Transfer returned by wait_any.
@@ -46,30 +46,37 @@ pub trait IoType
 
 // I want zero sized references and handle probably contains a ref
 // https://github.com/rust-lang/rfcs/pull/2040
-pub trait IoRefType: Clone {
-    type Handle;
+pub trait IoRefType {
+    type Handle: Clone;
     fn handle(&self) -> Self::Handle;
 }
 
-pub trait TransferBuilderType {
-    type Transfer;
-    fn submit(self) -> Self::Transfer;
-}
-
-pub trait TransferType {
-    fn cancel(&self) -> ::Result<()>;
-    fn status(&self) -> TransferStatus;
-}
-
 pub trait AsyncIoType<'ctx> : Sized {
-    type TransferBuilder: TransferBuilderType<Transfer=Self::Transfer>;
-    type Transfer: TransferType;
+    type TransferBuilder: TransferBuilderType<TransferHandle=Self::TransferHandle>;
+    type TransferHandle: TransferHandleType;
     type TransferCbData;
     type TransferCbRes;
 
-    fn allocate<TBF, F>(&self, callback: Option<TBF>) -> (Self::TransferBuilder, libusb_transfer_cb_fn, *mut c_void)
-        where TBF: Into<Box<F>>,
-                F: Fn(Self::TransferCbData) -> Self::TransferCbRes;
+    fn allocate<TBF>(&self, callback: Option<TBF>, buf: Vec<u8>) -> AsyncAllocationResult<Self::TransferBuilder>
+        where TBF: Into<Box<Fn(Self::TransferCbData) -> Self::TransferCbRes>>;
+}
+
+pub struct AsyncAllocationResult<Builder> {
+    pub builder:       Builder,
+    pub callback:      libusb_transfer_cb_fn,  // c abi callback
+    pub user_data_ptr: *mut c_void,
+    pub buf_ptr:       *mut c_uchar,
+    pub len:           i32,
+}
+
+pub trait TransferBuilderType {
+    type TransferHandle;
+    fn submit(self, transfer: *mut libusb_transfer) -> ::Result<Self::TransferHandle>;
+}
+
+pub trait TransferHandleType {
+    fn cancel(&self) -> ::Result<()>;
+    fn status(&self) -> TransferStatus;
 }
 
 pub mod generic {
@@ -110,16 +117,18 @@ pub mod async {
     pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, AsyncIo, &'ctx AsyncIo>;
 
     use std::ptr;
+    use std::mem::{size_of, transmute};
     use std::sync::Mutex;
     use std::os::unix::io::RawFd;
+    use std::collections::HashMap;
     use mio::{Ready, Token};
     use libusb::*;
     use libc::c_void;
     use super::*;
 
-
     pub struct AsyncIo {
         pub reg: Mutex<Option<(Token, Vec<(RawFd, Ready)>)>>,
+        pub transfers: Mutex<AsyncIoTransfers>,
     }
 
     impl IoType for AsyncIo {
@@ -129,8 +138,19 @@ pub mod async {
                        supported, see http://libusb.sourceforge.net/api-1.0/group__poll.html \
                        for details")
             }
+            if size_of::<usize>() != size_of::<*mut c_void>() {
+                panic!("Async code is written by assuming *mut c_void is as big as usize, \
+                        but its not, *mut c_void is {} and usize is {}",
+                        size_of::<*mut c_void>(), size_of::<usize>())
+
+            }
             AsyncIo {
-                reg: Mutex::new(None)
+                reg: Mutex::new(None),
+                transfers: Mutex::new( AsyncIoTransfers {
+                    next_id: 0,
+                    running: HashMap::new(),
+                    complete: Vec::new()
+                }),
             }
         }
     }
@@ -142,40 +162,76 @@ pub mod async {
 
     impl<'ctx> AsyncIoType<'ctx> for &'ctx AsyncIo {
         type TransferBuilder = AsyncIoTransferBuilder<'ctx>;
-        type Transfer = AsyncIoTransfer<'ctx>;
+        type TransferHandle = AsyncIoTransferHandle<'ctx>;
         type TransferCbData = ();
         type TransferCbRes = ();
 
-        fn allocate<TBF, F>(&self, _callback: Option<TBF>) -> (Self::TransferBuilder, libusb_transfer_cb_fn, *mut c_void)
-            where TBF: Into<Box<F>>,
-                    F: Fn(Self::TransferCbData) -> Self::TransferCbRes
+        fn allocate<TBF>(&self, cb: Option<TBF>, buf: Vec<u8>) -> AsyncAllocationResult<Self::TransferBuilder>
+            where TBF: Into<Box<Fn(Self::TransferCbData) -> Self::TransferCbRes>>,
         {
-            ( AsyncIoTransferBuilder { _io: self }, c_callback_function, ptr::null_mut() )
+            let mut tr = self.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
+            while tr.running.contains_key(&tr.next_id) {
+                tr.next_id += 1;
+            }
+            let id = tr.next_id;
+            tr.next_id += 1;
+            let mut transfer = Box::new(AsyncIoTransfer {
+                buf: buf,
+                callback: cb.map(|x| x.into()),
+                transfer: ptr::null_mut(),
+            });
+            let res = AsyncAllocationResult {
+                builder:       AsyncIoTransferBuilder { io: self, id: id },
+                callback:      async_io_callback_function,
+                user_data_ptr: unsafe{ transmute(id) },
+                buf_ptr:       transfer.buf.as_mut_ptr(),
+                len:           transfer.buf.len() as i32,
+            };
+            tr.running.insert(id, transfer);
+            res
         }
     }
 
     pub struct AsyncIoTransferBuilder<'ctx> {
-        _io: &'ctx AsyncIo
+        io: &'ctx AsyncIo,
+        id: usize,
     }
 
     impl<'ctx> TransferBuilderType for AsyncIoTransferBuilder<'ctx> {
-        type Transfer = AsyncIoTransfer<'ctx>;
-        fn submit(self) -> Self::Transfer {
-            let _t = AsyncIoTransfer { _io: self._io };
+        type TransferHandle = AsyncIoTransferHandle<'ctx>;
+
+        fn submit(self, transfer: *mut libusb_transfer) -> ::Result<Self::TransferHandle> {
+            let mut tr = self.io.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
+            let handle = AsyncIoTransferHandle { io: self.io, id: self.id };
+            // TODO: fix AsyncIoTransfer transfer ptr, s
+            let res = unsafe{ libusb_submit_transfer(transfer) }; // TODO: Conv to result
             unimplemented!()
         }
     }
 
-    pub struct AsyncIoTransfer<'ctx> {
-        _io: &'ctx AsyncIo
+    pub struct AsyncIoTransferHandle<'ctx> {
+        io: &'ctx AsyncIo,
+        id: usize,
     }
 
-    impl<'ctx> TransferType for AsyncIoTransfer<'ctx> {
+    impl<'ctx> TransferHandleType for AsyncIoTransferHandle<'ctx> {
         fn cancel(&self) -> ::Result<()> { unimplemented!() }
         fn status(&self) -> TransferStatus { unimplemented!() }
     }
 
-    extern "C" fn c_callback_function(_tr: *mut libusb_transfer) {
+    pub struct AsyncIoTransfer {
+        buf: Vec<u8>,
+        callback: Option<Box<Fn( () ) -> ()>>,
+        transfer: *mut libusb_transfer,
+    }
+
+    pub struct AsyncIoTransfers {
+        next_id: usize,
+        running: HashMap<usize, Box<AsyncIoTransfer>>,
+        complete: Vec<(usize, Box<AsyncIoTransfer>)>,
+    }
+
+    extern "C" fn async_io_callback_function(_tr: *mut libusb_transfer) {
         unimplemented!()
     }
 
