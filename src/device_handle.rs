@@ -124,16 +124,16 @@ mod async_api {
     macro_rules! tb {
         ($( $fn_nam:ident {$($var:ident : $typ:ty),*} $fill:ident  {$($v1:ident),*} {$($len:ident),*} {$($nip:ident),*} {$($znip:expr),*} {$($fcs:expr),*} )*) => {
 
-            impl<'ctx, Io, IoRef> DeviceHandle<'ctx, Io, IoRef>
-                where IoRef: AsyncIoType<'ctx>
+            impl<'ctx, 'dh, Io, IoRef> DeviceHandle<'ctx, Io, IoRef>
+                where IoRef: AsyncIoType<'dh, 'dh>
             {$(
                 #[allow(non_snake_case)]
-                pub fn $fn_nam<TBF>(self, buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> ::Result<<IoRef as AsyncIoType<'ctx>>::TransferHandle>
-                    where   TBF: Into<Box<Fn(<IoRef as AsyncIoType<'ctx>>::TransferCbData) -> <IoRef as AsyncIoType<'ctx>>::TransferCbRes>>,
-                          IoRef: AsyncIoType<'ctx>
+                pub fn $fn_nam<TBF>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> ::Result<<IoRef as AsyncIoType<'dh, 'dh>>::TransferHandle>
+                    where   TBF: Into<Box<Fn(<IoRef as AsyncIoType<'dh, 'dh>>::TransferCbData) -> <IoRef as AsyncIoType<'dh, 'dh>>::TransferCbRes>>,
+                          IoRef: AsyncIoType<'dh, 'dh>
                 {
                     let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
-                    let ar = self.ioref.allocate(callback, buf);
+                    let ar = self.ioref.allocate(&self.handle, callback, buf);
                     let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
                     unsafe { $fill(tr, self.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
                     fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);

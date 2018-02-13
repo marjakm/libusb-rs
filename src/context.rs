@@ -3,7 +3,7 @@ use std::mem;
 use libc::c_int;
 use libusb::*;
 
-use io::{IoType, IoRefType};
+use io::IoType;
 use device_list::{self, DeviceList};
 use device_handle::{self, DeviceHandle};
 use error;
@@ -27,8 +27,7 @@ unsafe impl<Io> Sync for Context<Io> {}
 unsafe impl<Io> Send for Context<Io> {}
 
 impl<Io> Context<Io>
-    where Io: IoType,
-          for<'io> &'io Io: IoRefType
+    where for<'ctx> Io: IoType<'ctx>
 {
     /// Opens a new `libusb` context.
     pub fn new() -> ::Result<Self> {
@@ -74,7 +73,7 @@ impl<Io> Context<Io>
     }
 
     /// Returns a list of the current USB devices. The context must outlive the device list.
-    pub fn devices<'ctx>(&'ctx self) -> ::Result<DeviceList<'ctx, Io, <&'ctx Io as IoRefType>::Handle>> {
+    pub fn devices<'ctx>(&'ctx self) -> ::Result<DeviceList<'ctx, Io, <Io as IoType>::Handle>> {
         let mut list: *const *mut libusb_device = unsafe { mem::uninitialized() };
 
         let n = unsafe { libusb_get_device_list(self.context, &mut list) };
@@ -95,7 +94,7 @@ impl<Io> Context<Io>
     ///
     /// Returns a device handle for the first device found matching `vendor_id` and `product_id`.
     /// On error, or if the device could not be found, it returns `None`.
-    pub fn open_device_with_vid_pid<'ctx>(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'ctx, Io, <&'ctx Io as IoRefType>::Handle>> {
+    pub fn open_device_with_vid_pid<'ctx>(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'ctx, Io, <Io as IoType>::Handle>> {
         let handle = unsafe { libusb_open_device_with_vid_pid(self.context, vendor_id, product_id) };
 
         if handle.is_null() {
@@ -121,18 +120,22 @@ mod async_io {
     use libc::{POLLIN, POLLOUT};
     use libusb::*;
 
-    use ::io::async::AsyncIo;
+    use ::io::async::{AsyncIo, AsyncIoTrRes};
     use ::error::from_libusb;
     use super::Context;
 
     impl Context<AsyncIo> {
-        pub fn handle(&self, poll: &Poll) -> ::Result<()> {
+        pub fn handle(&self, poll: &Poll, complete: &mut Vec<(usize, AsyncIoTrRes)>) -> ::Result<()> {
             let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
             match (*ir).as_mut() {
                 None => return Err("Register in Poll before calling handle".into()),
                 Some(ofds) => {
                     let res = match unsafe { libusb_handle_events_locked(self.context, ptr::null()) } {
-                        0 => Ok(()),
+                        0 => {
+                            let mut tr = self.io.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
+                            ::std::mem::swap(&mut tr.complete, complete);
+                            Ok(())
+                        },
                         e => Err(from_libusb(e))
                     };
                     if unsafe { libusb_event_handling_ok(self.context) } == 0 {
