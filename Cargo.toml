@@ -17,3 +17,6 @@ bit-set = "0.4"
 libusb-sys = { path = "../libusb-sys" }
 libc = "0.2"
 mio = "0.6"
+
+[dev-dependencies]
+env_logger = "*"

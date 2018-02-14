@@ -114,13 +114,17 @@ impl<'ctx, Io, IoRef> DeviceHandle<'ctx, Io, IoRef> {
 }
 
 mod async_api {
+    use std::slice;
     use std::time::Duration;
     use libc::c_uint;
     use libusb::*;
     use io::{TransferBuilderType, AsyncIoType};
     use super::DeviceHandle;
 
-    macro_rules! fcsm { ($e:expr;$($v:expr),*) => {unsafe{libusb_fill_control_setup($($v),*)}};  (;$($v:expr),*) => {}; }
+    macro_rules! fcsm {
+        (       ;$($v:expr),*) => {};
+        ($e:expr;$($v:expr),*) => { unsafe{_libusb_fill_control_setup($($v),*)} };
+    }
     macro_rules! tb {
         ($( $fn_nam:ident {$($var:ident : $typ:ty),*} $fill:ident  {$($v1:ident),*} {$($len:ident),*} {$($nip:ident),*} {$($znip:expr),*} {$($fcs:expr),*} )*) => {
 
@@ -128,28 +132,149 @@ mod async_api {
                 where IoRef: AsyncIoType<'dh, 'dh>
             {$(
                 #[allow(non_snake_case)]
-                pub fn $fn_nam<TBF>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<TBF>, $( $var: $typ ),*) -> ::Result<<IoRef as AsyncIoType<'dh, 'dh>>::TransferHandle>
-                    where   TBF: Into<Box<Fn(<IoRef as AsyncIoType<'dh, 'dh>>::TransferCbData) -> <IoRef as AsyncIoType<'dh, 'dh>>::TransferCbRes>>,
+                pub fn $fn_nam<F>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<F>, $( $var: $typ ),*) -> ::Result<<IoRef as AsyncIoType<'dh, 'dh>>::TransferHandle>
+                    where     F: FnMut(<IoRef as AsyncIoType<'dh, 'dh>>::TransferCbData) -> <IoRef as AsyncIoType<'dh, 'dh>>::TransferCbRes,
+                              F: 'static,
                           IoRef: AsyncIoType<'dh, 'dh>
                 {
+                    // debug!("BUF: {:?}", buf);
                     let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
-                    let ar = self.ioref.allocate(&self.handle, callback, buf);
+                    let ar = self.ioref.allocate(&self.handle, callback.map(|x| Box::new(x) as Box<_>), buf);
+                    // debug!("{:?}", ar);
                     let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
-                    unsafe { $fill(tr, self.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
                     fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);
-                    ar.builder.submit(tr)
+                    unsafe { $fill(tr, self.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
+                    let res = ar.builder.submit(tr);
+                    if let Err(ref e) = res {
+                        error!("Error submitting: {:?} ; {:?} ; buf: {:?}",
+                            e,
+                            unsafe{&*tr},
+                            unsafe{ slice::from_raw_parts((*tr).buffer, ar.len as usize) }
+                        );
+                    }
+                    res
                 }
             )*}
         }
     }
 
-    tb!(control      {bmRequestType: u8, bRequest: u8, wValue: u16, wIndex: u16 , wLength: u16}   libusb_fill_control_transfer     {}                     {}     {}                 {0} {0}
-        isochronous  {endpoint: u8, num_iso_packets: i32 }                                        libusb_fill_iso_transfer         {endpoint}             {len}  {num_iso_packets}  {}  {}
-        interrupt    {endpoint: u8 }                                                              libusb_fill_interrupt_transfer   {endpoint}             {len}  {}                 {0} {}
-        bulk         {endpoint: u8 }                                                              libusb_fill_bulk_transfer        {endpoint}             {len}  {}                 {0} {}
-        bulk_stream  {endpoint: u8, stream_id: u32 }                                              libusb_fill_bulk_stream_transfer {endpoint, stream_id}  {len}  {}                 {0} {}
+    tb!(control      {bmRequestType: u8, bRequest: u8, wValue: u16, wIndex: u16 , wLength: u16}   _libusb_fill_control_transfer     {}                     {}     {}                 {0} {0}
+        isochronous  {endpoint: u8, num_iso_packets: i32 }                                        _libusb_fill_iso_transfer         {endpoint}             {len}  {num_iso_packets}  {}  {}
+        interrupt    {endpoint: u8 }                                                              _libusb_fill_interrupt_transfer   {endpoint}             {len}  {}                 {0} {}
+        bulk         {endpoint: u8 }                                                              _libusb_fill_bulk_transfer        {endpoint}             {len}  {}                 {0} {}
+        bulk_stream  {endpoint: u8, stream_id: u32 }                                              _libusb_fill_bulk_stream_transfer {endpoint, stream_id}  {len}  {}                 {0} {}
     );
+}
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod async_io {
+    use std::time::Duration;
+    use std::sync::mpsc::channel;
+    use std::mem::size_of;
+
+    use libusb::*;
+    use io::async::{AsyncIo, AsyncIoCbData, AsyncIoCbRes};
+    use super::DeviceHandle;
+    use device_handle_sync_api::DeviceHandleSyncApi;
+
+    enum BufVar<'a> {
+        In(&'a mut [u8]),
+        Out(&'a [u8])
+    }
+
+    impl<'ctx> DeviceHandle<'ctx, AsyncIo, &'ctx AsyncIo> {
+        #[inline] fn control_msg<'a>(&self, request_type: u8, request: u8, value: u16, index: u16, buf_var: BufVar<'a>, timeout: Duration) -> ::Result<usize> {
+            let (snd, rcv) = channel();
+            let callback = Some(move |dat: AsyncIoCbData| { snd.send(dat).expect("control message channel send error"); AsyncIoCbRes::Done });
+            let csl = size_of::<libusb_control_setup>();
+            let (v,s) = match buf_var {
+                BufVar::In(ref buf) => {
+                    let mut v = Vec::with_capacity(csl+buf.len());
+                    v.resize(csl+buf.len(), 0);
+                    (v, buf.len())
+                },
+                BufVar::Out(ref buf) => {
+                    let mut v = Vec::with_capacity(csl+buf.len());
+                    v.resize(csl, 0);
+                    v.extend_from_slice(buf);
+                    (v, buf.len())
+                }
+            };
+            let _handle = self.control(v, timeout, callback, request_type, request, value, index, s as u16)?;
+            match rcv.recv() {
+                Ok(res) => {
+                    if let BufVar::In(buf) = buf_var {
+                        for i in 0..res.actual_length { buf[i] = res.buf[csl+i]; }
+                    }
+                    Ok(res.actual_length)
+                },
+                Err(e) => Err(format!("control message reveiver error: {:?}", e).into())
+            }
+        }
+
+        #[inline] fn int_blk_msg(&self, endpoint: u8, buf_var: BufVar, timeout: Duration, interrupt: bool) -> ::Result<usize> {
+            let (snd, rcv) = channel();
+            let callback = Some(move |dat: AsyncIoCbData| { snd.send(dat).expect("int_blk_msg channel send error"); AsyncIoCbRes::Done });
+            let v = match buf_var {
+                BufVar::In(ref buf) => {
+                    let mut v = Vec::with_capacity(buf.len());
+                    v.resize(buf.len(), 0);
+                    v
+                },
+                BufVar::Out(ref buf) => {
+                    let mut v = Vec::with_capacity(buf.len());
+                    v.extend_from_slice(buf);
+                    v
+                }
+            };
+            let _handle = if interrupt {
+                self.interrupt(v, timeout, callback, endpoint)?
+            } else {
+                self.bulk(v, timeout, callback, endpoint)?
+            };
+            match rcv.recv() {
+                Ok(res) => {
+                    if let BufVar::In(buf) = buf_var {
+                        for i in 0..res.actual_length { buf[i] = res.buf[i]; }
+                    }
+                    Ok(res.actual_length)
+                },
+                Err(e) => Err(format!("int_blk_msg message reveiver error: {:?}", e).into())
+            }
+        }
+    }
+
+    impl<'ctx> DeviceHandleSyncApi for DeviceHandle<'ctx, AsyncIo, &'ctx AsyncIo> {
+        fn read_interrupt(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> ::Result<usize> {
+            if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN { return Err(::Error::InvalidParam); }
+            self.int_blk_msg(endpoint, BufVar::In(buf), timeout, true)
+        }
+
+        fn write_interrupt(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> ::Result<usize> {
+            if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_OUT { return Err(::Error::InvalidParam); }
+            self.int_blk_msg(endpoint, BufVar::Out(buf), timeout, true)
+        }
+
+        fn read_bulk(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> ::Result<usize> {
+            if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN { return Err(::Error::InvalidParam); }
+            self.int_blk_msg(endpoint, BufVar::In(buf), timeout, false)
+        }
+
+        fn write_bulk(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> ::Result<usize> {
+            if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_OUT { return Err(::Error::InvalidParam); }
+            self.int_blk_msg(endpoint, BufVar::Out(buf), timeout, false)
+        }
+
+        fn read_control(&self, request_type: u8, request: u8, value: u16, index: u16, buf: &mut [u8], timeout: Duration) -> ::Result<usize> {
+            if request_type & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN { return Err(::Error::InvalidParam); }
+            self.control_msg(request_type, request, value, index, BufVar::In(buf), timeout)
+        }
+
+        fn write_control(&self, request_type: u8, request: u8, value: u16, index: u16, buf: &[u8], timeout: Duration) -> ::Result<usize> {
+            if request_type & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_OUT { return Err(::Error::InvalidParam); }
+            self.control_msg(request_type, request, value, index, BufVar::Out(buf), timeout)
+        }
+    }
 }
 
 mod sync_io {
@@ -160,9 +285,8 @@ mod sync_io {
 
     use io::sync::SyncIo;
     use error::{self, Error};
-    use device_handle_api::DeviceHandleSyncApi;
+    use device_handle_sync_api::DeviceHandleSyncApi;
     use super::DeviceHandle;
-
 
     impl<'ctx, IoRef> DeviceHandleSyncApi for DeviceHandle<'ctx, SyncIo, IoRef> {
         /// Reads from an interrupt endpoint.
@@ -445,7 +569,6 @@ mod sync_io {
                 Ok(res as usize)
             }
         }
-
     }
 }
 

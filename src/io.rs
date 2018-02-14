@@ -1,3 +1,4 @@
+use std::fmt;
 use libc::{c_uchar, c_void};
 use libusb::{self, libusb_transfer, libusb_device_handle, libusb_transfer_cb_fn, libusb_context};
 
@@ -51,8 +52,7 @@ pub trait AsyncIoType<'io, 'dh>: Sized {
     type TransferCbData;
     type TransferCbRes;
 
-    fn allocate<TBF>(&'io self, dh: &'dh *mut libusb_device_handle, cb: Option<TBF>, buf: Vec<u8>) -> AsyncAllocationResult<Self::TransferBuilder>
-        where TBF: Into<Box<Fn(Self::TransferCbData) -> Self::TransferCbRes>>;
+    fn allocate(&'io self, dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCbData) -> Self::TransferCbRes>>, buf: Vec<u8>) -> AsyncAllocationResult<Self::TransferBuilder>;
 }
 
 pub struct AsyncAllocationResult<TransferBuilder> {
@@ -61,6 +61,17 @@ pub struct AsyncAllocationResult<TransferBuilder> {
     pub user_data_ptr: *mut c_void,
     pub buf_ptr:       *mut c_uchar,
     pub len:           i32,
+}
+
+impl<TransferBuilder> fmt::Debug for AsyncAllocationResult<TransferBuilder> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "AsyncAllocationResult {{ callback: {:?}, user_data_ptr: {:?}, buf_ptr: {:?}, len: {:?} }}",
+               self.callback,
+               self.user_data_ptr,
+               self.buf_ptr,
+               self.len,
+        )
+    }
 }
 
 pub trait TransferBuilderType {
@@ -108,7 +119,6 @@ pub mod async {
 
     use std::ptr;
     use std::sync::Mutex;
-    use std::mem::transmute;
     use std::process::abort;
     use std::os::unix::io::RawFd;
     use std::collections::HashMap;
@@ -116,7 +126,6 @@ pub mod async {
     use std::marker::PhantomData;
     use mio::{Ready, Token};
     use libusb::*;
-    use libc::c_void;
     use super::*;
 
     pub struct AsyncIo {
@@ -150,15 +159,13 @@ pub mod async {
         fn handle(&'io self) -> Self::Handle { self }
     }
 
-    impl<'io, 'dh> AsyncIoType<'io, 'dh> for AsyncIo {
+    impl<'io, 'dh> AsyncIoType<'io, 'dh> for &'io AsyncIo {
         type TransferBuilder = AsyncIoTransferBuilder<'io, 'dh>;
         type TransferHandle = AsyncIoTransferHandle<'io, 'dh>;
         type TransferCbData = AsyncIoCbData;
         type TransferCbRes = AsyncIoCbRes;
 
-        fn allocate<TBF>(&'io self, _dh: &'dh *mut libusb_device_handle, cb: Option<TBF>, buf: Vec<u8>) -> AsyncAllocationResult<AsyncIoTransferBuilder<'io, 'dh>>
-            where TBF: Into<Box<Fn(Self::TransferCbData) -> Self::TransferCbRes>>,
-        {
+        fn allocate(&'io self, _dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCbData) -> Self::TransferCbRes>>, buf: Vec<u8>) -> AsyncAllocationResult<AsyncIoTransferBuilder<'io, 'dh>> {
             let mut tr = self.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
             while tr.running.contains_key(&tr.next_id) {
                 tr.next_id += 1;
@@ -167,15 +174,15 @@ pub mod async {
             tr.next_id += 1;
             let mut transfer = Box::new(AsyncIoTransfer {
                 id: id,
-                io: self as _,
+                io: *self as _,
                 buf: Some(buf),
-                callback: cb.map(|x| x.into()),
+                callback: cb,
                 transfer: ptr::null_mut(),
             });
             let res = AsyncAllocationResult {
                 builder:       AsyncIoTransferBuilder { io: self, id: id, _dh: PhantomData },
                 callback:      async_io_callback_function,
-                user_data_ptr: unsafe{ transmute(&mut *transfer) },
+                user_data_ptr: ((&mut *transfer as &mut AsyncIoTransfer) as *mut AsyncIoTransfer) as *mut c_void,
                 buf_ptr:       transfer.buf.as_mut().unwrap().as_mut_ptr(),
                 len:           transfer.buf.as_ref().unwrap().len() as i32,
             };
@@ -245,7 +252,7 @@ pub mod async {
         id: usize,
         io: *const AsyncIo,
         buf: Option<Vec<u8>>,
-        callback: Option<Box<Fn(AsyncIoCbData) -> AsyncIoCbRes>>,
+        callback: Option<Box<FnMut(AsyncIoCbData) -> AsyncIoCbRes>>,
         transfer: *mut libusb_transfer,
     }
 
@@ -268,7 +275,7 @@ pub mod async {
                 status: TransferStatus::from(tr.status),
             };
             let atrr = match aiotr.callback {
-                Some(ref cb) => {
+                Some(ref mut cb) => {
                     let res = cb(cb_data);
                     match res {
                         AsyncIoCbRes::Done => AsyncIoTrRes::Handled,

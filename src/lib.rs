@@ -17,7 +17,7 @@ pub use endpoint_descriptor::EndpointDescriptor;
 pub use language::{Language, PrimaryLanguage, SubLanguage};
 
 pub use context::LogLevel;
-pub use device_handle_api::DeviceHandleSyncApi;
+pub use device_handle_sync_api::DeviceHandleSyncApi;
 pub use io::*;
 pub use io::sync::*; //TODO: For backwards compatability, maybe remove?
 
@@ -34,7 +34,7 @@ mod context;
 mod device_list;
 mod device;
 mod device_handle;
-mod device_handle_api;
+mod device_handle_sync_api;
 
 mod fields;
 mod device_descriptor;
