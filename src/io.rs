@@ -40,19 +40,19 @@ impl From<i32> for TransferStatus {
 
 // I want zero sized references and handle probably contains a ref
 // https://github.com/rust-lang/rfcs/pull/2040
-pub trait IoType<'io>: 'static {
+pub trait IoType<'ctx>: 'static {
     type Handle: Clone;
     fn new(ctx: *mut libusb_context) -> Self;
-    fn handle(&'io self) -> Self::Handle;
+    fn handle(&'ctx self) -> Self::Handle;
 }
 
-pub trait AsyncIoType<'io, 'dh>: Sized {
+pub trait AsyncIoType<'ctx, 'dh>: Sized {
     type TransferBuilder: TransferBuilderType<TransferHandle=Self::TransferHandle>;
     type TransferHandle:  TransferHandleType;
     type TransferCbData;
     type TransferCbRes;
 
-    fn allocate(&'io self, dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCbData) -> Self::TransferCbRes>>, buf: Vec<u8>) -> AsyncAllocationResult<Self::TransferBuilder>;
+    fn allocate(&self, dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCbData) -> Self::TransferCbRes>>, buf: Vec<u8>) -> AsyncAllocationResult<Self::TransferBuilder>;
 }
 
 pub struct AsyncAllocationResult<TransferBuilder> {
@@ -92,10 +92,10 @@ pub mod generic {
 
 pub mod sync {
     pub type Context            = ::context::Context<SyncIo>;
-    pub type DeviceList<'ctx>   = ::device_list::DeviceList<'ctx, SyncIo, ()>;
-    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, SyncIo, ()>;
-    pub type Device<'ctx>       = ::device::Device<'ctx, SyncIo, ()>;
-    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, SyncIo, ()>;
+    pub type DeviceList<'ctx>   = ::device_list::DeviceList<'ctx, SyncIo>;
+    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, SyncIo>;
+    pub type Device<'ctx>       = ::device::Device<'ctx, SyncIo>;
+    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, SyncIo>;
 
     use super::IoType;
     use libusb::libusb_context;
@@ -112,10 +112,10 @@ pub mod sync {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod async {
     pub type Context            = ::context::Context<AsyncIo>;
-    pub type DeviceList<'ctx>   = ::device_list::DeviceList<'ctx, AsyncIo, &'ctx AsyncIo>;
-    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, AsyncIo, &'ctx AsyncIo>;
-    pub type Device<'ctx>       = ::device::Device<'ctx, AsyncIo, &'ctx AsyncIo>;
-    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, AsyncIo, &'ctx AsyncIo>;
+    pub type DeviceList<'ctx>   = ::device_list::DeviceList<'ctx, AsyncIo>;
+    pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, AsyncIo>;
+    pub type Device<'ctx>       = ::device::Device<'ctx, AsyncIo>;
+    pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, AsyncIo>;
 
     use std::ptr;
     use std::sync::Mutex;
@@ -139,8 +139,8 @@ pub mod async {
         pub complete: Vec<(usize, AsyncIoTrRes)>,
     }
 
-    impl<'io> IoType<'io> for AsyncIo {
-        type Handle = &'io AsyncIo;
+    impl<'ctx> IoType<'ctx> for AsyncIo {
+        type Handle = &'ctx AsyncIo;
         fn new(ctx: *mut libusb_context) -> Self {
             if unsafe { libusb_pollfds_handle_timeouts(ctx) } == 0 {
                 panic!("This system requires time-based event handling, which is not \
@@ -156,16 +156,16 @@ pub mod async {
                 }),
             }
         }
-        fn handle(&'io self) -> Self::Handle { self }
+        fn handle(&'ctx self) -> Self::Handle { self }
     }
 
-    impl<'io, 'dh> AsyncIoType<'io, 'dh> for &'io AsyncIo {
-        type TransferBuilder = AsyncIoTransferBuilder<'io, 'dh>;
-        type TransferHandle = AsyncIoTransferHandle<'io, 'dh>;
+    impl<'ctx, 'dh> AsyncIoType<'ctx, 'dh> for &'ctx AsyncIo {
+        type TransferBuilder = AsyncIoTransferBuilder<'ctx, 'dh>;
+        type TransferHandle = AsyncIoTransferHandle<'ctx, 'dh>;
         type TransferCbData = AsyncIoCbData;
         type TransferCbRes = AsyncIoCbRes;
 
-        fn allocate(&'io self, _dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCbData) -> Self::TransferCbRes>>, buf: Vec<u8>) -> AsyncAllocationResult<AsyncIoTransferBuilder<'io, 'dh>> {
+        fn allocate(&self, _dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCbData) -> Self::TransferCbRes>>, buf: Vec<u8>) -> AsyncAllocationResult<AsyncIoTransferBuilder<'ctx, 'dh>> {
             let mut tr = self.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
             while tr.running.contains_key(&tr.next_id) {
                 tr.next_id += 1;
@@ -191,16 +191,16 @@ pub mod async {
         }
     }
 
-    pub struct AsyncIoTransferBuilder<'io, 'dh> {
-        io: &'io AsyncIo,
+    pub struct AsyncIoTransferBuilder<'ctx, 'dh> {
+        io: &'ctx AsyncIo,
         id: usize,
         _dh: PhantomData<&'dh *mut libusb_device_handle>,
     }
 
-    impl<'io, 'dh> TransferBuilderType for AsyncIoTransferBuilder<'io, 'dh> {
-        type TransferHandle = AsyncIoTransferHandle<'io, 'dh>;
+    impl<'ctx, 'dh> TransferBuilderType for AsyncIoTransferBuilder<'ctx, 'dh> {
+        type TransferHandle = AsyncIoTransferHandle<'ctx, 'dh>;
 
-        fn submit(self, transfer: *mut libusb_transfer) -> ::Result<AsyncIoTransferHandle<'io, 'dh>> {
+        fn submit(self, transfer: *mut libusb_transfer) -> ::Result<AsyncIoTransferHandle<'ctx, 'dh>> {
             let mut transfers = self.io.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
             match transfers.running.get_mut(&self.id) {
                 Some(tr) => { tr.transfer = transfer; },
@@ -211,13 +211,13 @@ pub mod async {
         }
     }
 
-    pub struct AsyncIoTransferHandle<'io, 'dh> {
-        io: &'io AsyncIo,
+    pub struct AsyncIoTransferHandle<'ctx, 'dh> {
+        io: &'ctx AsyncIo,
         id: usize,
         _dh: PhantomData<&'dh *mut libusb_device_handle>,
     }
 
-    impl<'io, 'dh> TransferHandleType for AsyncIoTransferHandle<'io, 'dh> {
+    impl<'ctx, 'dh> TransferHandleType for AsyncIoTransferHandle<'ctx, 'dh> {
         fn cancel(&self) -> ::Result<()> {
             let mut transfers = self.io.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
             match transfers.running.get_mut(&self.id) {
