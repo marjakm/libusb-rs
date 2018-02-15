@@ -5,46 +5,38 @@ use libusb::{self, libusb_transfer, libusb_device_handle, libusb_transfer_cb_fn,
 
 // I want zero sized references and handle probably contains a ref
 // https://github.com/rust-lang/rfcs/pull/2040
-pub trait IoType<'ctx>: 'static {
-    type Handle: Clone;
+pub trait IoType<'ctx>: 'static+fmt::Debug {
+    type Handle: Clone+fmt::Debug;
     fn new(ctx: *mut libusb_context) -> Self;
     fn handle(&'ctx self) -> Self::Handle;
 }
 
-pub trait AsyncIoType<'ctx, 'dh>: Sized {
-    type TransferBuilder: AsyncIoTransferBuilderType<TransferHandle=Self::TransferHandle>;
-    type TransferHandle:  AsyncIoTransferHandleType;
-    type TransferCallbackData;
-    type TransferCallbackResult;
+pub trait AsyncIoType<'ctx, 'dh>: Sized+fmt::Debug {
+    type TransferBuilder: AsyncIoTransferBuilderType<TransferHandle=Self::TransferHandle>+fmt::Debug;
+    type TransferHandle:  AsyncIoTransferHandleType+fmt::Debug;
+    type TransferCallbackData: fmt::Debug;
+    type TransferCallbackResult: fmt::Debug;
     fn allocate(&self, dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCallbackData) -> Self::TransferCallbackResult>>, buf: Vec<u8>) -> AsyncIoTransferAllocationResult<Self::TransferBuilder>;
 }
 
-pub trait AsyncIoTransferBuilderType {
-    type TransferHandle;
+pub trait AsyncIoTransferBuilderType: fmt::Debug {
+    type TransferHandle: fmt::Debug;
     fn submit(self, transfer: *mut libusb_transfer) -> ::Result<Self::TransferHandle>;
 }
 
-pub trait AsyncIoTransferHandleType {
+pub trait AsyncIoTransferHandleType: fmt::Debug {
     fn cancel(&self) -> ::Result<()>;
 }
 
-pub struct AsyncIoTransferAllocationResult<TransferBuilder> {
+#[derive(Debug)]
+pub struct AsyncIoTransferAllocationResult<TransferBuilder>
+    where TransferBuilder: fmt::Debug
+{
     pub builder:       TransferBuilder,
-    pub callback:      libusb_transfer_cb_fn,  // c abi callback
+    pub callback:      libusb_transfer_cb_fn,
     pub user_data_ptr: *mut c_void,
     pub buf_ptr:       *mut c_uchar,
     pub len:           i32,
-}
-
-impl<TransferBuilder> fmt::Debug for AsyncIoTransferAllocationResult<TransferBuilder> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "AsyncIoTransferAllocationResult {{ callback: {:?}, user_data_ptr: {:?}, buf_ptr: {:?}, len: {:?} }}",
-               self.callback,
-               self.user_data_ptr,
-               self.buf_ptr,
-               self.len,
-        )
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -93,6 +85,7 @@ pub mod sync {
     use super::IoType;
     use libusb::libusb_context;
 
+    #[derive(Debug)]
     pub struct SyncIo;
 
     impl<'ctx> IoType<'ctx> for SyncIo {
@@ -121,11 +114,13 @@ pub mod unix_async {
     use libusb::*;
     use super::*;
 
+    #[derive(Debug)]
     pub struct UnixAsyncIo {
         pub reg: Mutex<Option<(Token, Vec<(RawFd, Ready)>)>>,
         pub state: Mutex<UnixAsyncIoState>,
     }
 
+    #[derive(Debug)]
     pub struct UnixAsyncIoState {
         next_id: usize,
         running: HashMap<usize, Box<UnixAsyncIoTransfer>>,
@@ -184,6 +179,7 @@ pub mod unix_async {
         }
     }
 
+    #[derive(Debug)]
     pub struct UnixAsyncIoTransferBuilder<'ctx, 'dh> {
         io: &'ctx UnixAsyncIo,
         id: usize,
@@ -204,6 +200,7 @@ pub mod unix_async {
         }
     }
 
+    #[derive(Debug)]
     pub struct UnixAsyncIoTransferHandle<'ctx, 'dh> {
         io: &'ctx UnixAsyncIo,
         id: usize,
@@ -223,18 +220,21 @@ pub mod unix_async {
         }
     }
 
+    #[derive(Debug)]
     pub struct UnixAsyncIoCallbackData {
         pub buf: Vec<u8>,
         pub actual_length: usize,
         pub status: AsyncIoTransferStatus,
     }
 
+    #[derive(Debug)]
     pub enum UnixAsyncIoCallbackResult {
         Handled,                            // Consumed buffer
-        Unhandled(UnixAsyncIoCallbackData),   // Handle this in mio
+        Unhandled(UnixAsyncIoCallbackData), // Handle this in mio
         ReSubmit(Vec<u8>),                  // Resubmit with buf (may be a new one)
     }
 
+    #[derive(Debug)]
     pub enum UnixAsyncIoTransferResult {
         Handled,
         Unhandled(UnixAsyncIoCallbackData),
@@ -247,6 +247,16 @@ pub mod unix_async {
         buf: Option<Vec<u8>>,
         callback: Option<Box<FnMut(UnixAsyncIoCallbackData) -> UnixAsyncIoCallbackResult>>,
         transfer: *mut libusb_transfer,
+    }
+
+    impl fmt::Debug for UnixAsyncIoTransfer {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "UnixAsyncIoTransfer {{ id: {}, io: {:?}, buf: {:?}, callback: {}, transfer: {:?} }}",
+                   self.id, self.io, self.buf,
+                   if self.callback.is_some() { "Some" } else { "None" },
+                   self.transfer
+            )
+        }
     }
 
     extern "C" fn async_io_callback_function(transfer_ptr: *mut libusb_transfer) {
