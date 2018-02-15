@@ -5,7 +5,7 @@ extern crate env_logger;
 use std::thread::spawn;
 use std::sync::Arc;
 use mio::*;
-use libusb::io::async::*;
+use libusb::io::unix_async::*;
 // use libusb::LogLevel;
 
 include!("_read_device.rs");

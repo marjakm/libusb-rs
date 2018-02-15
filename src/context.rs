@@ -107,7 +107,7 @@ impl<Io> Context<Io>
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod async_io {
+mod unix_async_io {
     use std::io;
     use std::slice;
     use std::os::unix::io::RawFd;
@@ -119,29 +119,25 @@ mod async_io {
     use libc::{POLLIN, POLLOUT, timeval};
     use libusb::*;
 
-    use ::io::async::{AsyncIo, AsyncIoTrRes};
+    use ::io::unix_async::{UnixAsyncIo, UnixAsyncIoTransferResult};
     use ::error::from_libusb;
     use super::Context;
 
-    impl Context<AsyncIo> {
-        pub fn handle(&self, poll: &Poll, complete: &mut Vec<(usize, AsyncIoTrRes)>) -> ::Result<()> {
-            debug!("HANDLE");
-            let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
-            // debug!("HANDLE LOCKED REG");
+    impl Context<UnixAsyncIo> {
+        pub fn handle(&self, poll: &Poll, complete: &mut Vec<(usize, UnixAsyncIoTransferResult)>) -> ::Result<()> {
+            let mut ir = self.io.reg.lock().expect("Could not unlock UnixAsyncIo reg mutex");
             match (*ir).as_mut() {
                 None => return Err("Register in Poll before calling handle".into()),
                 Some(ofds) => {
                     let tv = timeval { tv_sec: 0, tv_usec: 0 };
                     let res = match unsafe { libusb_handle_events_locked(self.context, &tv as *const timeval) } {
                         0 => {
-                            let mut tr = self.io.transfers.lock().expect("Could not unlock AsyncIo transfers mutex");
-                            // debug!("HANDLE LOCKED TRANSFERS");
+                            let mut tr = self.io.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
                             ::std::mem::swap(&mut tr.complete, complete);
                             Ok(())
                         },
                         e => Err(from_libusb(e))
                     };
-                    // debug!("EVENTS HANDLED");
                     if unsafe { libusb_event_handling_ok(self.context) } == 0 {
                         unsafe { libusb_unlock_events(self.context) };
                         self.spin_until_locked_and_ok_to_handle_events();
@@ -156,7 +152,6 @@ mod async_io {
                         }
                     }
                     ofds.1 = fds;
-                    debug!("HANDLE DONE");
                     res
                 }
             }
@@ -169,7 +164,6 @@ mod async_io {
             let mut iter = sl.iter();
             while let Some(x) = iter.next() {
                 if x.is_null() { break; }
-                // debug!("IS NOT NULL: {:?}", x);
                 let pfd = unsafe { &**x as &libusb_pollfd };
                 let mut rdy = Ready::empty();
                 if (pfd.events & POLLIN ) != 0 { rdy = rdy | Ready::readable(); }
@@ -178,7 +172,7 @@ mod async_io {
             }
             unsafe { libusb_free_pollfds(pfdl) };
             v.sort();
-            debug!("POLLFDS: {:?}", v);
+            debug!("get_pollfd_list: {:?}", v);
             v
         }
 
@@ -201,20 +195,16 @@ mod async_io {
         }
     }
 
-    impl Evented for Context<AsyncIo> {
+    impl Evented for Context<UnixAsyncIo> {
         fn register(&self, poll: &Poll, token: Token, _interest: Ready, _opts: PollOpt) -> io::Result<()> {
-            debug!("REGISTER");
-            let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
-            // debug!("LOCKED");
+            let mut ir = self.io.reg.lock().expect("Could not unlock UnixAsyncIo reg mutex");
             if ir.is_some() { panic!("It is not safe to register libusb file descriptors multiple times") }
             self.spin_until_locked_and_ok_to_handle_events();
-            // debug!("OK TO HANDLE");
             let fds = self.get_pollfd_list();
             for &(ref fd, ref rdy) in fds.iter() {
                 poll.register(&EventedFd(fd), token, *rdy, PollOpt::level())?;
             }
             *ir = Some((token, fds));
-            debug!("REGISTER DONE");
             Ok(())
         }
 
@@ -224,7 +214,7 @@ mod async_io {
         }
 
         fn deregister(&self, poll: &Poll) -> io::Result<()> {
-            let mut ir = self.io.reg.lock().expect("Could not unlock AsyncIo reg mutex");
+            let mut ir = self.io.reg.lock().expect("Could not unlock UnixAsyncIo reg mutex");
             match ir.take() {
                 Some((_, fds)) => for (fd, _) in fds.into_iter() { poll.deregister(&EventedFd(&fd))?; },
                 None => panic!("Unable to deregister libusb file descriptors when they are not registered")

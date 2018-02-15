@@ -122,7 +122,7 @@ mod async_api {
     use std::time::Duration;
     use libc::c_uint;
     use libusb::*;
-    use io::{IoType, AsyncIoType, TransferBuilderType};
+    use io::{IoType, AsyncIoType, AsyncIoTransferBuilderType};
     use super::DeviceHandle;
 
     macro_rules! fcsm {
@@ -138,7 +138,7 @@ mod async_api {
             {$(
                 #[allow(non_snake_case)]
                 pub fn $fn_nam<F>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<F>, $( $var: $typ ),*) -> ::Result<<<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferHandle>
-                    where     F: FnMut(<<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferCbData) -> <<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferCbRes,
+                    where     F: FnMut(<<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferCallbackData) -> <<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferCallbackResult,
                               F: 'static,
                 {
                     // debug!("BUF: {:?}", buf);
@@ -171,25 +171,24 @@ mod async_api {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod async_io {
+mod unix_async_io {
     use std::time::Duration;
     use std::sync::mpsc::channel;
     use std::mem::size_of;
-
     use libusb::*;
-    use io::async::{AsyncIo, AsyncIoCbData, AsyncIoCbRes};
     use super::DeviceHandle;
     use device_handle_sync_api::DeviceHandleSyncApi;
+    use io::unix_async::{UnixAsyncIo, UnixAsyncIoCallbackResult};
 
     enum BufVar<'a> {
         In(&'a mut [u8]),
         Out(&'a [u8])
     }
 
-    impl<'ctx, 'dh> DeviceHandle<'ctx, AsyncIo> {
+    impl<'ctx, 'dh> DeviceHandle<'ctx, UnixAsyncIo> {
         #[inline] fn control_msg<'a>(&'dh self, request_type: u8, request: u8, value: u16, index: u16, buf_var: BufVar<'a>, timeout: Duration) -> ::Result<usize> {
             let (snd, rcv) = channel();
-            let callback = Some(move |dat: AsyncIoCbData| { snd.send(dat).expect("control message channel send error"); AsyncIoCbRes::Done });
+            let callback = Some(move |dat| { snd.send(dat).expect("control message channel send error"); UnixAsyncIoCallbackResult::Handled });
             let csl = size_of::<libusb_control_setup>();
             let (v,s) = match buf_var {
                 BufVar::In(ref buf) => {
@@ -218,7 +217,7 @@ mod async_io {
 
         #[inline] fn int_blk_msg<'a>(&'dh self, endpoint: u8, buf_var: BufVar<'a>, timeout: Duration, interrupt: bool) -> ::Result<usize> {
             let (snd, rcv) = channel();
-            let callback = Some(move |dat: AsyncIoCbData| { snd.send(dat).expect("int_blk_msg channel send error"); AsyncIoCbRes::Done });
+            let callback = Some(move |dat| { snd.send(dat).expect("int_blk_msg channel send error"); UnixAsyncIoCallbackResult::Handled });
             let v = match buf_var {
                 BufVar::In(ref buf) => {
                     let mut v = Vec::with_capacity(buf.len());
@@ -248,7 +247,7 @@ mod async_io {
         }
     }
 
-    impl<'ctx> DeviceHandleSyncApi for DeviceHandle<'ctx, AsyncIo> {
+    impl<'ctx> DeviceHandleSyncApi for DeviceHandle<'ctx, UnixAsyncIo> {
         fn read_interrupt(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> ::Result<usize> {
             if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN { return Err(::Error::InvalidParam); }
             self.int_blk_msg(endpoint, BufVar::In(buf), timeout, true)
