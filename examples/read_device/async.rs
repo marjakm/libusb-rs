@@ -5,10 +5,10 @@ extern crate env_logger;
 use std::thread::spawn;
 use std::sync::Arc;
 use mio::*;
-use libusb::io::unix_async::*;
+pub use libusb::io::unix_async::*;
 // use libusb::LogLevel;
 
-include!("_read_device.rs");
+mod inner;
 
 fn main() {
     env_logger::init();
@@ -21,7 +21,7 @@ fn main() {
     let context_c = context.clone();
     spawn(|| mio_thread(context_c));
 
-    inner_main(&context);
+    inner::main(&context);
 }
 
 fn mio_thread(context: Arc<Context>) {

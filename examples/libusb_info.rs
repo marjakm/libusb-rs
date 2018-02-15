@@ -5,7 +5,7 @@ fn main() {
 
     println!("libusb v{}.{}.{}.{}{}", version.major(), version.minor(), version.micro(), version.nano(), version.rc().unwrap_or(""));
 
-    let mut context = match libusb::Context::new() {
+    let mut context = match libusb::io::sync::Context::new() {
         Ok(c) => c,
         Err(e) => panic!("libusb::Context::new(): {}", e)
     };

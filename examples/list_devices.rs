@@ -1,11 +1,12 @@
 extern crate libusb;
-use libusb::DeviceHandleSyncApi;
+use libusb::{Language, Speed, DeviceDescriptor, InterfaceDescriptor, ConfigDescriptor, EndpointDescriptor, DeviceHandleSyncApi};
+use libusb::io::sync::{Context, DeviceHandle};
 
 use std::time::Duration;
 
 struct UsbDevice<'a> {
-    handle: libusb::DeviceHandle<'a>,
-    language: libusb::Language,
+    handle: DeviceHandle<'a>,
+    language: Language,
     timeout: Duration
 }
 
@@ -17,7 +18,7 @@ fn main() {
 fn list_devices() -> libusb::Result<()> {
     let timeout = Duration::from_secs(1);
 
-    let context = try!(libusb::Context::new());
+    let context = try!(Context::new());
 
     for device in try!(context.devices()).iter() {
         let device_desc = match device.device_descriptor() {
@@ -74,7 +75,7 @@ fn list_devices() -> libusb::Result<()> {
     Ok(())
 }
 
-fn print_device(device_desc: &libusb::DeviceDescriptor, handle: &mut Option<UsbDevice>) {
+fn print_device(device_desc: &DeviceDescriptor, handle: &mut Option<UsbDevice>) {
     println!("Device Descriptor:");
     println!("  bcdUSB             {:2}.{}{}", device_desc.usb_version().major(), device_desc.usb_version().minor(), device_desc.usb_version().sub_minor());
     println!("  bDeviceClass        {:#04x}", device_desc.class_code());
@@ -96,7 +97,7 @@ fn print_device(device_desc: &libusb::DeviceDescriptor, handle: &mut Option<UsbD
     println!("  bNumConfigurations   {:3}", device_desc.num_configurations());
 }
 
-fn print_config(config_desc: &libusb::ConfigDescriptor, handle: &mut Option<UsbDevice>) {
+fn print_config(config_desc: &ConfigDescriptor, handle: &mut Option<UsbDevice>) {
     println!("  Config Descriptor:");
     println!("    bNumInterfaces       {:3}", config_desc.num_interfaces());
     println!("    bConfigurationValue  {:3}", config_desc.number());
@@ -109,7 +110,7 @@ fn print_config(config_desc: &libusb::ConfigDescriptor, handle: &mut Option<UsbD
     println!("    bMaxPower           {:4}mW", config_desc.max_power());
 }
 
-fn print_interface(interface_desc: &libusb::InterfaceDescriptor, handle: &mut Option<UsbDevice>) {
+fn print_interface(interface_desc: &InterfaceDescriptor, handle: &mut Option<UsbDevice>) {
     println!("    Interface Descriptor:");
     println!("      bInterfaceNumber     {:3}", interface_desc.interface_number());
     println!("      bAlternateSetting    {:3}", interface_desc.setting_number());
@@ -122,7 +123,7 @@ fn print_interface(interface_desc: &libusb::InterfaceDescriptor, handle: &mut Op
              handle.as_mut().map_or(String::new(), |h| h.handle.read_interface_string(h.language, interface_desc, h.timeout).unwrap_or(String::new())));
 }
 
-fn print_endpoint(endpoint_desc: &libusb::EndpointDescriptor) {
+fn print_endpoint(endpoint_desc: &EndpointDescriptor) {
     println!("      Endpoint Descriptor:");
     println!("        bEndpointAddress    {:#04x} EP {} {:?}", endpoint_desc.address(), endpoint_desc.number(), endpoint_desc.direction());
     println!("        bmAttributes:");
@@ -133,12 +134,12 @@ fn print_endpoint(endpoint_desc: &libusb::EndpointDescriptor) {
     println!("        bInterval            {:3}", endpoint_desc.interval());
 }
 
-fn get_speed(speed: libusb::Speed) -> &'static str {
+fn get_speed(speed: Speed) -> &'static str {
     match speed {
-        libusb::Speed::Super   => "5000 Mbps",
-        libusb::Speed::High    => " 480 Mbps",
-        libusb::Speed::Full    => "  12 Mbps",
-        libusb::Speed::Low     => " 1.5 Mbps",
-        libusb::Speed::Unknown => "(unknown)"
+        Speed::Super   => "5000 Mbps",
+        Speed::High    => " 480 Mbps",
+        Speed::Full    => "  12 Mbps",
+        Speed::Low     => " 1.5 Mbps",
+        Speed::Unknown => "(unknown)"
     }
 }

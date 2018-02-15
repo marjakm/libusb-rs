@@ -18,5 +18,21 @@ libusb-sys = { path = "../libusb-sys" }
 libc = "0.2"
 mio = "0.6"
 
+[[example]]
+name = "read_device_sync"
+path = "examples/read_device/sync.rs"
+
+[[example]]
+name = "read_device_async"
+path = "examples/read_device/async.rs"
+
+[[example]]
+name = "libusb_info"
+path = "examples/libusb_info.rs"
+
+[[example]]
+name = "list_devices"
+path = "examples/list_devices.rs"
+
 [dev-dependencies]
 env_logger = "*"

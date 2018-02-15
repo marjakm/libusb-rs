@@ -16,10 +16,11 @@ pub use interface_descriptor::{Interface, InterfaceDescriptors, InterfaceDescrip
 pub use endpoint_descriptor::EndpointDescriptor;
 pub use language::{Language, PrimaryLanguage, SubLanguage};
 
-pub use context::LogLevel;
+pub use context::{Context, LogLevel};
+pub use device_list::{DeviceList, Devices};
+pub use device::Device;
+pub use device_handle::DeviceHandle;
 pub use device_handle_sync_api::DeviceHandleSyncApi;
-pub use io::*;
-pub use io::sync::*; //TODO: For backwards compatability, maybe remove?
 
 
 #[cfg(test)]

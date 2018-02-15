@@ -4,6 +4,7 @@ use std::slice;
 use std::str::FromStr;
 use std::time::Duration;
 use std::process::exit;
+use ::*;
 
 
 #[derive(Debug)]
@@ -14,7 +15,7 @@ struct Endpoint {
     address: u8
 }
 
-fn inner_main(context: &Context) {
+pub fn main(context: &Context) {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         println!("usage: read_device <vendor-id-in-base-10> <product-id-in-base-10>");
