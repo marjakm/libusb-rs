@@ -1,5 +1,9 @@
-use std::marker::PhantomData;
+use std::fmt;
 use std::mem;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::borrow::Borrow;
+use std::marker::PhantomData;
 use libc::c_int;
 use libusb::*;
 
@@ -9,9 +13,10 @@ use device_handle::{self, DeviceHandle};
 use error;
 
 /// A `libusb` context.
+#[derive(Debug)]
 pub struct Context<Io> {
     context: *mut libusb_context,
-    io: Io,
+    pub io: Io,
 }
 
 impl<Io> Drop for Context<Io> {
@@ -26,17 +31,7 @@ impl<Io> Drop for Context<Io> {
 unsafe impl<Io> Sync for Context<Io> {}
 unsafe impl<Io> Send for Context<Io> {}
 
-impl<Io> Context<Io>
-    where for<'ctx> Io: IoType<'ctx>
-{
-    /// Opens a new `libusb` context.
-    pub fn new() -> ::Result<Self> {
-        let mut context = unsafe { mem::uninitialized() };
-
-        try_unsafe!(libusb_init(&mut context));
-
-        Ok(Context { io: Io::new(context), context: context })
-    }
+impl<Io> Context<Io> {
 
     /// Sets the log level of a `libusb` context.
     pub fn set_log_level(&mut self, level: LogLevel) {
@@ -71,18 +66,29 @@ impl<Io> Context<Io>
             libusb_has_capability(LIBUSB_CAP_SUPPORTS_DETACH_KERNEL_DRIVER) != 0
         }
     }
+}
+
+pub trait ContextApi<'ctx, Io>
+    where Self: Sized,
+          Io: IoType<Self::CtxMarker>,
+{
+    type CtxMarker: Borrow<Context<Io>>+Clone+fmt::Debug;
+
+    fn ctx_marker(&self) -> Self::CtxMarker;
+
+    /// Opens a new `libusb` context.
+    fn new() -> ::Result<Self>;
 
     /// Returns a list of the current USB devices. The context must outlive the device list.
-    pub fn devices<'ctx>(&'ctx self) -> ::Result<DeviceList<'ctx, Io>> {
+    fn devices(&'ctx self) -> ::Result<DeviceList<<Io as IoType<Self::CtxMarker>>::Handle, Self::CtxMarker>> {
+        let ctx_marker = self.ctx_marker();
+        let ctx_ref = Borrow::<Context<Io>>::borrow(&ctx_marker);
         let mut list: *const *mut libusb_device = unsafe { mem::uninitialized() };
-
-        let n = unsafe { libusb_get_device_list(self.context, &mut list) };
-
+        let n = unsafe { libusb_get_device_list(ctx_ref.context, &mut list) };
         if n < 0 {
             Err(error::from_libusb(n as c_int))
-        }
-        else {
-            Ok(unsafe { device_list::from_libusb(self, self.io.handle(), list, n as usize) })
+        } else {
+            Ok(unsafe { device_list::from_libusb(ctx_marker.clone(), ctx_ref.io.handle(ctx_marker.clone()), list, n as usize) })
         }
     }
 
@@ -94,16 +100,61 @@ impl<Io> Context<Io>
     ///
     /// Returns a device handle for the first device found matching `vendor_id` and `product_id`.
     /// On error, or if the device could not be found, it returns `None`.
-    pub fn open_device_with_vid_pid<'ctx>(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<'ctx, Io>> {
-        let handle = unsafe { libusb_open_device_with_vid_pid(self.context, vendor_id, product_id) };
-
+    fn open_device_with_vid_pid(&'ctx self, vendor_id: u16, product_id: u16) -> Option<DeviceHandle<<Io as IoType<Self::CtxMarker>>::Handle, Self::CtxMarker>> {
+        let ctx_marker = self.ctx_marker();
+        let ctx_ref = Borrow::<Context<Io>>::borrow(&ctx_marker);
+        let handle = unsafe { libusb_open_device_with_vid_pid(ctx_ref.context, vendor_id, product_id) };
         if handle.is_null() {
             None
-        }
-        else {
-            Some(unsafe { device_handle::from_libusb(PhantomData, (&self.io).handle(), handle) })
+        } else {
+            Some(unsafe { device_handle::from_libusb(ctx_marker.clone(), ctx_ref.io.handle(ctx_marker.clone()), handle) })
         }
     }
+}
+
+impl<'ctx, Io> ContextApi<'ctx, Io> for Context<Io>
+    where Io: IoType<&'ctx Context<Io>>,
+{
+    type CtxMarker = &'ctx Context<Io>;
+
+    fn ctx_marker<'a>(&'a self) -> Self::CtxMarker {unimplemented!()}
+
+    fn new() -> ::Result<Self> {
+        let mut context = unsafe { mem::uninitialized() };
+        try_unsafe!(libusb_init(&mut context));
+        Ok(Context { io: Io::new(context), context: context })
+    }
+
+}
+
+impl<'ctx, Io> ContextApi<'ctx, Io> for Rc<Context<Io>>
+    where Io: IoType<Rc<Context<Io>>>,
+{
+    type CtxMarker = Rc<Context<Io>>;
+
+    fn ctx_marker<'a>(&'a self) -> Self::CtxMarker {unimplemented!()}
+
+    fn new() -> ::Result<Self> {
+        let mut context = unsafe { mem::uninitialized() };
+        try_unsafe!(libusb_init(&mut context));
+        Ok(Rc::new(Context { io: Io::new(context), context: context }))
+    }
+
+}
+
+impl<'ctx, Io> ContextApi<'ctx, Io> for Arc<Context<Io>>
+    where Io: IoType<Arc<Context<Io>>>,
+{
+    type CtxMarker = Arc<Context<Io>>;
+
+    fn ctx_marker<'a>(&'a self) -> Self::CtxMarker {unimplemented!()}
+
+    fn new() -> ::Result<Self> {
+        let mut context = unsafe { mem::uninitialized() };
+        try_unsafe!(libusb_init(&mut context));
+        Ok(Arc::new(Context { io: Io::new(context), context: context }))
+    }
+
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

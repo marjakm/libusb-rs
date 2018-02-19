@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::mem;
 
 use bit_set::BitSet;
@@ -11,18 +10,14 @@ use error;
 
 
 /// A handle to an open USB device.
-pub struct DeviceHandle<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
-    context: PhantomData<&'ctx Context<Io>>,
-    io_handle: <Io as IoType<'ctx>>::Handle,
+pub struct DeviceHandle<IoHandle, CtxMarker> {
+    ctx_marker: CtxMarker,
+    io_handle: IoHandle,
     handle: *mut libusb_device_handle,
     interfaces: BitSet,
 }
 
-impl<'ctx, Io> Drop for DeviceHandle<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
+impl<IoHandle, CtxMarker> Drop for DeviceHandle<IoHandle, CtxMarker> {
     /// Closes the device.
     fn drop(&mut self) {
         unsafe {
@@ -34,12 +29,10 @@ impl<'ctx, Io> Drop for DeviceHandle<'ctx, Io>
     }
 }
 
-unsafe impl<'ctx, Io: IoType<'ctx>> Send for DeviceHandle<'ctx, Io> {}
-unsafe impl<'ctx, Io: IoType<'ctx>> Sync for DeviceHandle<'ctx, Io> {}
+unsafe impl<IoHandle, CtxMarker> Send for DeviceHandle<IoHandle, CtxMarker> {}
+unsafe impl<IoHandle, CtxMarker> Sync for DeviceHandle<IoHandle, CtxMarker> {}
 
-impl<'ctx, Io> DeviceHandle<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
+impl<IoHandle, CtxMarker> DeviceHandle<IoHandle, CtxMarker> {
     /// Returns the active configuration number.
     pub fn active_configuration(&self) -> ::Result<u8> {
         let mut config = unsafe { mem::uninitialized() };
@@ -132,13 +125,12 @@ mod async_api {
     macro_rules! tb {
         ($( $fn_nam:ident {$($var:ident : $typ:ty),*} $fill:ident  {$($v1:ident),*} {$($len:ident),*} {$($nip:ident),*} {$($znip:expr),*} {$($fcs:expr),*} )*) => {
 
-            impl<'ctx, 'dh, Io> DeviceHandle<'ctx, Io>
-                where Io: IoType<'ctx>,
-                      <Io as IoType<'ctx>>::Handle: AsyncIoType<'ctx, 'dh>
+            impl<'dh, IoHandle, CtxMarker> DeviceHandle<IoHandle, CtxMarker>
+                where IoHandle: AsyncIoType<'dh, CtxMarker>
             {$(
                 #[allow(non_snake_case)]
-                pub fn $fn_nam<F>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<F>, $( $var: $typ ),*) -> ::Result<<<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferHandle>
-                    where     F: FnMut(<<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferCallbackData) -> <<Io as IoType<'ctx>>::Handle as AsyncIoType<'ctx, 'dh>>::TransferCallbackResult,
+                pub fn $fn_nam<F>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<F>, $( $var: $typ ),*) -> ::Result<<IoHandle as AsyncIoType<'dh, CtxMarker>>::TransferHandle>
+                    where     F: FnMut(<IoHandle as AsyncIoType<'dh, CtxMarker>>::TransferCallbackData) -> <IoHandle as AsyncIoType<'dh, CtxMarker>>::TransferCallbackResult,
                               F: 'static,
                 {
                     // debug!("BUF: {:?}", buf);
@@ -172,20 +164,25 @@ mod async_api {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_async_io {
+    use std::fmt;
+    use std::borrow::Borrow;
     use std::time::Duration;
     use std::sync::mpsc::channel;
     use std::mem::size_of;
     use libusb::*;
     use super::DeviceHandle;
+    use context::Context;
     use device_handle_sync_api::DeviceHandleSyncApi;
-    use io::unix_async::{UnixAsyncIo, UnixAsyncIoCallbackResult};
+    use io::unix_async::{UnixAsyncIo, UnixAsyncIoHandle, UnixAsyncIoCallbackResult};
 
     enum BufVar<'a> {
         In(&'a mut [u8]),
         Out(&'a [u8])
     }
 
-    impl<'ctx, 'dh> DeviceHandle<'ctx, UnixAsyncIo> {
+    impl<'dh, CtxMarker> DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>
+        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    {
         #[inline] fn control_msg<'a>(&'dh self, request_type: u8, request: u8, value: u16, index: u16, buf_var: BufVar<'a>, timeout: Duration) -> ::Result<usize> {
             let (snd, rcv) = channel();
             let callback = Some(move |dat| { snd.send(dat).expect("control message channel send error"); UnixAsyncIoCallbackResult::Handled });
@@ -247,7 +244,9 @@ mod unix_async_io {
         }
     }
 
-    impl<'ctx> DeviceHandleSyncApi for DeviceHandle<'ctx, UnixAsyncIo> {
+    impl<'ctx, CtxMarker> DeviceHandleSyncApi for DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>
+        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    {
         fn read_interrupt(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> ::Result<usize> {
             if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN { return Err(::Error::InvalidParam); }
             self.int_blk_msg(endpoint, BufVar::In(buf), timeout, true)
@@ -291,7 +290,7 @@ mod sync_io {
     use device_handle_sync_api::DeviceHandleSyncApi;
     use super::DeviceHandle;
 
-    impl<'ctx> DeviceHandleSyncApi for DeviceHandle<'ctx, SyncIo> {
+    impl<CtxMarker> DeviceHandleSyncApi for DeviceHandle<SyncIo, CtxMarker> {
         /// Reads from an interrupt endpoint.
         ///
         /// This function attempts to read from the interrupt endpoint with the address given by the
@@ -576,11 +575,9 @@ mod sync_io {
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'ctx, Io>(context: PhantomData<&'ctx Context<Io>>, io_handle: <Io as IoType<'ctx>>::Handle, handle: *mut libusb_device_handle) -> DeviceHandle<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
+pub unsafe fn from_libusb<IoHandle, CtxMarker>(ctx_marker: CtxMarker, io_handle: IoHandle, handle: *mut libusb_device_handle) -> DeviceHandle<IoHandle, CtxMarker> {
     DeviceHandle {
-        context: context,
+        ctx_marker: ctx_marker,
         io_handle: io_handle,
         handle: handle,
         interfaces: BitSet::with_capacity(u8::max_value() as usize + 1),

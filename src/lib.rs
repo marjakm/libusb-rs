@@ -44,3 +44,5 @@ mod interface_descriptor;
 mod endpoint_descriptor;
 mod language;
 pub mod io;
+
+pub mod ref_type;

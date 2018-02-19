@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::mem;
 
 use libusb::*;
@@ -12,17 +11,13 @@ use fields::{self, Speed};
 
 
 /// A reference to a USB device.
-pub struct Device<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
-    context: PhantomData<&'ctx Context<Io>>,
-    io_handle: <Io as IoType<'ctx>>::Handle,
+pub struct Device<IoHandle, CtxMarker> {
+    ctx_marker: CtxMarker,
+    io_handle: IoHandle,
     device: *mut libusb_device,
 }
 
-impl<'ctx, Io> Drop for Device<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
+impl<IoHandle, CtxMarker> Drop for Device<IoHandle, CtxMarker> {
     /// Releases the device reference.
     fn drop(&mut self) {
         unsafe {
@@ -31,11 +26,12 @@ impl<'ctx, Io> Drop for Device<'ctx, Io>
     }
 }
 
-unsafe impl<'ctx, Io: IoType<'ctx>> Send for Device<'ctx, Io> {}
-unsafe impl<'ctx, Io: IoType<'ctx>> Sync for Device<'ctx, Io> {}
+unsafe impl<IoHandle, CtxMarker> Send for Device<IoHandle, CtxMarker> {}
+unsafe impl<IoHandle, CtxMarker> Sync for Device<IoHandle, CtxMarker> {}
 
-impl<'ctx, Io> Device<'ctx, Io>
-    where Io: IoType<'ctx>,
+impl<IoHandle, CtxMarker> Device<IoHandle, CtxMarker>
+    where IoHandle:Clone,
+          CtxMarker: Clone,
 {
     /// Reads the device descriptor.
     pub fn device_descriptor(&self) -> ::Result<DeviceDescriptor> {
@@ -87,23 +83,20 @@ impl<'ctx, Io> Device<'ctx, Io>
     }
 
     /// Opens the device.
-    pub fn open(&self) -> ::Result<DeviceHandle<'ctx, Io>> {
+    pub fn open(&self) -> ::Result<DeviceHandle<IoHandle, CtxMarker>> {
         let mut handle: *mut libusb_device_handle = unsafe { mem::uninitialized() };
 
         try_unsafe!(libusb_open(self.device, &mut handle));
 
-        Ok(unsafe { device_handle::from_libusb(PhantomData, self.io_handle.clone(), handle) })
+        Ok(unsafe { device_handle::from_libusb(self.ctx_marker.clone(), self.io_handle.clone(), handle) })
     }
 }
 
 #[doc(hidden)]
-pub unsafe fn from_libusb<'ctx, Io>(context: PhantomData<&'ctx Context<Io>>, io_handle: <Io as IoType<'ctx>>::Handle, device: *mut libusb_device) -> Device<'ctx, Io>
-    where Io: IoType<'ctx>,
-{
+pub unsafe fn from_libusb<IoHandle, CtxMarker>(ctx_marker: CtxMarker, io_handle: IoHandle, device: *mut libusb_device) -> Device<IoHandle, CtxMarker> {
     libusb_ref_device(device);
-
     Device {
-        context: context,
+        ctx_marker: ctx_marker,
         io_handle: io_handle,
         device: device,
     }
