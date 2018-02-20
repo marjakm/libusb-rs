@@ -1,11 +1,11 @@
 extern crate libusb;
-use libusb::{Language, Speed, DeviceDescriptor, InterfaceDescriptor, ConfigDescriptor, EndpointDescriptor, DeviceHandleSyncApi};
+use libusb::{Language, Speed, DeviceDescriptor, InterfaceDescriptor, ConfigDescriptor, EndpointDescriptor, ContextApi, DeviceHandleSyncApi};
 use libusb::io::sync::{Context, DeviceHandle};
 
 use std::time::Duration;
 
-struct UsbDevice<'a> {
-    handle: DeviceHandle<'a>,
+struct UsbDevice<'ctx> {
+    handle: DeviceHandle<&'ctx Context>,
     language: Language,
     timeout: Duration
 }

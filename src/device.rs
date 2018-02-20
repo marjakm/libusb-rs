@@ -1,9 +1,5 @@
 use std::mem;
-
 use libusb::*;
-
-use io::IoType;
-use context::Context;
 use device_handle::{self, DeviceHandle};
 use device_descriptor::{self, DeviceDescriptor};
 use config_descriptor::{self, ConfigDescriptor};

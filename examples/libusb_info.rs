@@ -1,4 +1,5 @@
 extern crate libusb;
+use libusb::ContextApi;
 
 fn main() {
     let version = libusb::version();

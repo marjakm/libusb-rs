@@ -3,7 +3,6 @@ use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::borrow::Borrow;
-use std::marker::PhantomData;
 use libc::c_int;
 use libusb::*;
 
@@ -32,7 +31,6 @@ unsafe impl<Io> Sync for Context<Io> {}
 unsafe impl<Io> Send for Context<Io> {}
 
 impl<Io> Context<Io> {
-
     /// Sets the log level of a `libusb` context.
     pub fn set_log_level(&mut self, level: LogLevel) {
         unsafe {
@@ -74,7 +72,7 @@ pub trait ContextApi<'ctx, Io>
 {
     type CtxMarker: Borrow<Context<Io>>+Clone+fmt::Debug;
 
-    fn ctx_marker(&self) -> Self::CtxMarker;
+    fn ctx_marker(&'ctx self) -> Self::CtxMarker;
 
     /// Opens a new `libusb` context.
     fn new() -> ::Result<Self>;
@@ -113,18 +111,17 @@ pub trait ContextApi<'ctx, Io>
 }
 
 impl<'ctx, Io> ContextApi<'ctx, Io> for Context<Io>
-    where Io: IoType<&'ctx Context<Io>>,
+    where Io: 'ctx+IoType<&'ctx Context<Io>>,
 {
     type CtxMarker = &'ctx Context<Io>;
 
-    fn ctx_marker<'a>(&'a self) -> Self::CtxMarker {unimplemented!()}
+    fn ctx_marker(&'ctx self) -> Self::CtxMarker { self }
 
     fn new() -> ::Result<Self> {
         let mut context = unsafe { mem::uninitialized() };
         try_unsafe!(libusb_init(&mut context));
         Ok(Context { io: Io::new(context), context: context })
     }
-
 }
 
 impl<'ctx, Io> ContextApi<'ctx, Io> for Rc<Context<Io>>
@@ -132,14 +129,13 @@ impl<'ctx, Io> ContextApi<'ctx, Io> for Rc<Context<Io>>
 {
     type CtxMarker = Rc<Context<Io>>;
 
-    fn ctx_marker<'a>(&'a self) -> Self::CtxMarker {unimplemented!()}
+    fn ctx_marker(&'ctx self) -> Self::CtxMarker { self.clone() }
 
     fn new() -> ::Result<Self> {
         let mut context = unsafe { mem::uninitialized() };
         try_unsafe!(libusb_init(&mut context));
         Ok(Rc::new(Context { io: Io::new(context), context: context }))
     }
-
 }
 
 impl<'ctx, Io> ContextApi<'ctx, Io> for Arc<Context<Io>>
@@ -147,14 +143,13 @@ impl<'ctx, Io> ContextApi<'ctx, Io> for Arc<Context<Io>>
 {
     type CtxMarker = Arc<Context<Io>>;
 
-    fn ctx_marker<'a>(&'a self) -> Self::CtxMarker {unimplemented!()}
+    fn ctx_marker(&'ctx self) -> Self::CtxMarker { self.clone() }
 
     fn new() -> ::Result<Self> {
         let mut context = unsafe { mem::uninitialized() };
         try_unsafe!(libusb_init(&mut context));
         Ok(Arc::new(Context { io: Io::new(context), context: context }))
     }
-
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

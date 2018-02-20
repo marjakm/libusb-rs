@@ -6,6 +6,7 @@ use std::thread::spawn;
 use std::sync::Arc;
 use mio::*;
 pub use libusb::io::unix_async::*;
+pub use libusb::ContextApi;
 // use libusb::LogLevel;
 
 mod inner;

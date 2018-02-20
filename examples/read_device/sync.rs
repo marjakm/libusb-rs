@@ -2,6 +2,7 @@ extern crate libusb;
 extern crate env_logger;
 
 pub use libusb::io::sync::*;
+pub use libusb::ContextApi;
 // use libusb::LogLevel;
 
 mod inner;

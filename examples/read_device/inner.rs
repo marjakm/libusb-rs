@@ -33,7 +33,7 @@ pub fn main(context: &Context) {
     }
 }
 
-fn open_device(context: &Context, vid: u16, pid: u16) -> Option<(Device, DeviceDescriptor, DeviceHandle)> {
+fn open_device(context: &Context, vid: u16, pid: u16) -> Option<(Device<&Context>, DeviceDescriptor, DeviceHandle<&Context>)> {
     let devices = match context.devices() {
         Ok(d) => d,
         Err(_) => return None
@@ -53,7 +53,7 @@ fn open_device(context: &Context, vid: u16, pid: u16) -> Option<(Device, DeviceD
     None
 }
 
-fn read_device(device: &mut Device, device_desc: &DeviceDescriptor, handle: &mut DeviceHandle) -> libusb::Result<()> {
+fn read_device(device: &mut Device<&Context>, device_desc: &DeviceDescriptor, handle: &mut DeviceHandle<&Context>) -> libusb::Result<()> {
     try!(handle.reset());
     let timeout = Duration::from_secs(1);
     let languages = try!(handle.read_languages(timeout));
@@ -76,7 +76,7 @@ fn read_device(device: &mut Device, device_desc: &DeviceDescriptor, handle: &mut
     Ok(())
 }
 
-fn find_readable_endpoint(device: &mut Device, device_desc: &DeviceDescriptor, transfer_type: TransferType) -> Option<Endpoint> {
+fn find_readable_endpoint(device: &mut Device<&Context>, device_desc: &DeviceDescriptor, transfer_type: TransferType) -> Option<Endpoint> {
     for n in 0..device_desc.num_configurations() {
         let config_desc = match device.config_descriptor(n) {
             Ok(c) => c,
@@ -100,7 +100,7 @@ fn find_readable_endpoint(device: &mut Device, device_desc: &DeviceDescriptor, t
     None
 }
 
-fn read_endpoint(handle: &mut DeviceHandle, endpoint: Endpoint, transfer_type: TransferType) {
+fn read_endpoint(handle: &mut DeviceHandle<&Context>, endpoint: Endpoint, transfer_type: TransferType) {
     println!("Reading from endpoint: {:?}", endpoint);
     let has_kernel_driver = match handle.kernel_driver_active(endpoint.iface) {
         Ok(true) => {
@@ -144,7 +144,7 @@ fn read_endpoint(handle: &mut DeviceHandle, endpoint: Endpoint, transfer_type: T
     }
 }
 
-fn configure_endpoint<'a>(handle: &'a mut DeviceHandle, endpoint: &Endpoint) -> libusb::Result<()> {
+fn configure_endpoint<'a>(handle: &'a mut DeviceHandle<&Context>, endpoint: &Endpoint) -> libusb::Result<()> {
     try!(handle.set_active_configuration(endpoint.config));
     try!(handle.claim_interface(endpoint.iface));
     try!(handle.set_alternate_setting(endpoint.iface, endpoint.setting));

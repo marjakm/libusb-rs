@@ -1,40 +1,41 @@
-use std::fmt;
+use std::fmt::Debug;
 use std::borrow::Borrow;
 use libc::{c_uchar, c_void};
-use libusb::{self, libusb_transfer, libusb_device_handle, libusb_transfer_cb_fn, libusb_context};
+use libusb::{self, libusb_transfer, libusb_transfer_cb_fn, libusb_context};
 use context::Context;
+use device_handle::DeviceHandle;
 
 
-// I want zero sized references and handle probably contains a ref
-// https://github.com/rust-lang/rfcs/pull/2040
-pub trait IoType<CtxMarker>: 'static+Sized+fmt::Debug
-    where CtxMarker: Borrow<Context<Self>>
+pub trait IoType<CtxMarker>: Sized+Debug
+    where CtxMarker: Borrow<Context<Self>>+Clone+Debug
 {
-    type Handle: Clone+fmt::Debug;
+    type Handle: Clone+Debug;
     fn new(ctx: *mut libusb_context) -> Self;
     fn handle(&self, ctx_marker: CtxMarker) -> Self::Handle;
 }
 
-pub trait AsyncIoType<'dh, CtxMarker>: Sized+fmt::Debug {
-    type TransferBuilder: AsyncIoTransferBuilderType<TransferHandle=Self::TransferHandle>+fmt::Debug;
-    type TransferHandle:  AsyncIoTransferHandleType+fmt::Debug;
-    type TransferCallbackData: fmt::Debug;
-    type TransferCallbackResult: fmt::Debug;
-    fn allocate(&self, dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCallbackData) -> Self::TransferCallbackResult>>, buf: Vec<u8>) -> AsyncIoTransferAllocationResult<Self::TransferBuilder>;
+pub trait AsyncIoType<CtxMarker, DhMarker>: Sized+Debug
+    where DhMarker: Borrow<DeviceHandle<Self, CtxMarker>>+Clone+Debug
+{
+    type TransferBuilder: AsyncIoTransferBuilderType<TransferHandle=Self::TransferHandle>+Debug;
+    type TransferHandle:  AsyncIoTransferHandleType+Debug;
+    type TransferCallbackData: Debug;
+    type TransferCallbackResult: Debug;
+    fn allocate(&self, dh_marker: DhMarker, cb: Option<Box<FnMut(Self::TransferCallbackData) -> Self::TransferCallbackResult>>, buf: Vec<u8>) -> AsyncIoTransferAllocationResult<Self::TransferBuilder>;
 }
 
-pub trait AsyncIoTransferBuilderType: fmt::Debug {
-    type TransferHandle: fmt::Debug;
+pub trait AsyncIoTransferBuilderType: Debug {
+    type TransferHandle: Debug;
     fn submit(self, transfer: *mut libusb_transfer) -> ::Result<Self::TransferHandle>;
 }
 
-pub trait AsyncIoTransferHandleType: fmt::Debug {
+pub trait AsyncIoTransferHandleType: Debug {
     fn cancel(&self) -> ::Result<()>;
 }
 
 #[derive(Debug)]
 pub struct AsyncIoTransferAllocationResult<TransferBuilder>
-    where TransferBuilder: fmt::Debug
+    where TransferBuilder: Debug
 {
     pub builder:       TransferBuilder,
     pub callback:      libusb_transfer_cb_fn,
@@ -80,36 +81,36 @@ impl From<i32> for AsyncIoTransferStatus {
 // Implementations ////////////////////////////////////////////////////////////////////
 
 pub mod sync {
-    // pub type Context            = ::context::Context<SyncIo>;
-    // pub type DeviceList<'ctx>   = ::device_list::DeviceList<'ctx, SyncIo>;
-    // pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, SyncIo>;
-    // pub type Device<'ctx>       = ::device::Device<'ctx, SyncIo>;
-    // pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, SyncIo>;
+    pub type Context                 = ::context::Context<SyncIo>;
+    pub type DeviceList<CtxMarker>   = ::device_list::DeviceList<SyncIo, CtxMarker>;
+    pub type Devices<'dl, CtxMarker> = ::device_list::Devices<'dl, SyncIo, CtxMarker>;
+    pub type Device<CtxMarker>       = ::device::Device<SyncIo, CtxMarker>;
+    pub type DeviceHandle<CtxMarker> = ::device_handle::DeviceHandle<SyncIo, CtxMarker>;
 
+    use std::fmt::Debug;
     use std::borrow::Borrow;
     use libusb::libusb_context;
     use super::IoType;
-    use context::Context;
 
     #[derive(Debug, Clone)]
     pub struct SyncIo;
 
     impl<CtxMarker> IoType<CtxMarker> for SyncIo
-        where CtxMarker: Borrow<Context<Self>>
+        where CtxMarker: Borrow<::context::Context<Self>>+Clone+Debug
     {
         type Handle = SyncIo;
         fn new(_ctx: *mut libusb_context) -> Self { SyncIo }
-        fn handle(&self, ctx_marker: CtxMarker) -> Self::Handle { SyncIo }
+        fn handle(&self, _ctx_marker: CtxMarker) -> Self::Handle { SyncIo }
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod unix_async {
-    // pub type Context            = ::context::Context<UnixAsyncIo>;
-    // pub type DeviceList<'ctx>   = ::device_list::DeviceList<'ctx, UnixAsyncIo>;
-    // pub type Devices<'ctx, 'dl> = ::device_list::Devices<'ctx, 'dl, UnixAsyncIo>;
-    // pub type Device<'ctx>       = ::device::Device<'ctx, UnixAsyncIo>;
-    // pub type DeviceHandle<'ctx> = ::device_handle::DeviceHandle<'ctx, UnixAsyncIo>;
+    pub type Context                 = ::context::Context<UnixAsyncIo>;
+    pub type DeviceList<CtxMarker>   = ::device_list::DeviceList<UnixAsyncIoHandle<CtxMarker>, CtxMarker>;
+    pub type Devices<'dl, CtxMarker> = ::device_list::Devices<'dl, UnixAsyncIoHandle<CtxMarker>, CtxMarker>;
+    pub type Device<CtxMarker>       = ::device::Device<UnixAsyncIoHandle<CtxMarker>, CtxMarker>;
+    pub type DeviceHandle<CtxMarker> = ::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>;
 
     use std::ptr;
     use std::fmt;
@@ -119,7 +120,6 @@ pub mod unix_async {
     use std::os::unix::io::RawFd;
     use std::collections::HashMap;
     use std::panic::catch_unwind;
-    use std::marker::PhantomData;
     use mio::{Ready, Token};
     use libusb::*;
     use super::*;
@@ -138,7 +138,7 @@ pub mod unix_async {
     }
 
     impl<CtxMarker> IoType<CtxMarker> for UnixAsyncIo
-        where CtxMarker: Borrow<Context<Self>>+Clone+fmt::Debug
+        where CtxMarker: Borrow<::context::Context<Self>>+Clone+Debug
     {
         type Handle = UnixAsyncIoHandle<CtxMarker>;
         fn new(ctx: *mut libusb_context) -> Self {
@@ -160,18 +160,19 @@ pub mod unix_async {
     }
 
     #[derive(Debug, Clone)]
-    pub struct UnixAsyncIoHandle<CtxMarker>(CtxMarker) where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug;
+    pub struct UnixAsyncIoHandle<CtxMarker>(CtxMarker) where CtxMarker: Borrow<::context::Context<UnixAsyncIo>>+Clone+Debug;
 
-    impl<'dh, CtxMarker> AsyncIoType<'dh, CtxMarker> for UnixAsyncIoHandle<CtxMarker>
-        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    impl<CtxMarker, DhMarker> AsyncIoType<CtxMarker, DhMarker> for UnixAsyncIoHandle<CtxMarker>
+        where CtxMarker: Borrow<::context::Context<UnixAsyncIo>>+Clone+Debug,
+              DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
-        type TransferBuilder = UnixAsyncIoTransferBuilder<'dh, CtxMarker>;
-        type TransferHandle = UnixAsyncIoTransferHandle<'dh, CtxMarker>;
+        type TransferBuilder = UnixAsyncIoTransferBuilder<CtxMarker, DhMarker>;
+        type TransferHandle = UnixAsyncIoTransferHandle<CtxMarker, DhMarker>;
         type TransferCallbackData = UnixAsyncIoCallbackData;
         type TransferCallbackResult = UnixAsyncIoCallbackResult;
 
-        fn allocate(&self, _dh: &'dh *mut libusb_device_handle, cb: Option<Box<FnMut(Self::TransferCallbackData) -> Self::TransferCallbackResult>>, buf: Vec<u8>) -> AsyncIoTransferAllocationResult<Self::TransferBuilder> {
-            let io_ref = &Borrow::<Context<UnixAsyncIo>>::borrow(&self.0).io;
+        fn allocate(&self, dh_marker: DhMarker, cb: Option<Box<FnMut(Self::TransferCallbackData) -> Self::TransferCallbackResult>>, buf: Vec<u8>) -> AsyncIoTransferAllocationResult<Self::TransferBuilder> {
+            let io_ref = &Borrow::<::context::Context<UnixAsyncIo>>::borrow(&self.0).io;
             let mut tr = io_ref.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
             while tr.running.contains_key(&tr.next_id) {
                 tr.next_id += 1;
@@ -186,7 +187,7 @@ pub mod unix_async {
                 transfer: ptr::null_mut(),
             });
             let res = AsyncIoTransferAllocationResult {
-                builder:       UnixAsyncIoTransferBuilder { io: self.clone(), id: id, _dh: PhantomData },
+                builder:       UnixAsyncIoTransferBuilder { io: self.clone(), id: id, dh_marker: dh_marker.clone()  },
                 callback:      async_io_callback_function,
                 user_data_ptr: ((&mut *transfer as &mut UnixAsyncIoTransfer) as *mut UnixAsyncIoTransfer) as *mut c_void,
                 buf_ptr:       transfer.buf.as_mut().unwrap().as_mut_ptr(),
@@ -198,45 +199,49 @@ pub mod unix_async {
     }
 
     #[derive(Debug)]
-    pub struct UnixAsyncIoTransferBuilder<'dh, CtxMarker>
-        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    pub struct UnixAsyncIoTransferBuilder<CtxMarker, DhMarker>
+        where CtxMarker: Borrow<::context::Context<UnixAsyncIo>>+Clone+Debug,
+              DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
         io: UnixAsyncIoHandle<CtxMarker>,
         id: usize,
-        _dh: PhantomData<&'dh *mut libusb_device_handle>,
+        dh_marker: DhMarker,
     }
 
-    impl<'dh, CtxMarker> AsyncIoTransferBuilderType for UnixAsyncIoTransferBuilder<'dh, CtxMarker>
-        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    impl<CtxMarker, DhMarker> AsyncIoTransferBuilderType for UnixAsyncIoTransferBuilder<CtxMarker, DhMarker>
+        where CtxMarker: Borrow<::context::Context<UnixAsyncIo>>+Clone+Debug,
+              DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
-        type TransferHandle = UnixAsyncIoTransferHandle<'dh, CtxMarker>;
+        type TransferHandle = UnixAsyncIoTransferHandle<CtxMarker, DhMarker>;
 
         fn submit(self, transfer: *mut libusb_transfer) -> ::Result<Self::TransferHandle> {
-            let io_ref = &Borrow::<Context<UnixAsyncIo>>::borrow(&self.io.0).io;
+            let io_ref = &Borrow::<::context::Context<UnixAsyncIo>>::borrow(&self.io.0).io;
             let mut state = io_ref.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
             match state.running.get_mut(&self.id) {
                 Some(tr) => { tr.transfer = transfer; },
                 None => return Err("Should not happen: TransferBuilder id has no match in running state".into())
             }
             try_unsafe!(libusb_submit_transfer(transfer));
-            Ok(UnixAsyncIoTransferHandle { io: self.io.clone(), id: self.id, _dh: PhantomData })
+            Ok(UnixAsyncIoTransferHandle { io: self.io.clone(), id: self.id, dh_marker: self.dh_marker.clone() })
         }
     }
 
     #[derive(Debug)]
-    pub struct UnixAsyncIoTransferHandle<'dh, CtxMarker>
-        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    pub struct UnixAsyncIoTransferHandle<CtxMarker, DhMarker>
+        where CtxMarker: Borrow<::context::Context<UnixAsyncIo>>+Clone+Debug,
+              DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
         io: UnixAsyncIoHandle<CtxMarker>,
         id: usize,
-        _dh: PhantomData<&'dh *mut libusb_device_handle>,
+        dh_marker: DhMarker,
     }
 
-    impl<'dh, CtxMarker> AsyncIoTransferHandleType for UnixAsyncIoTransferHandle<'dh, CtxMarker>
-        where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
+    impl<CtxMarker, DhMarker> AsyncIoTransferHandleType for UnixAsyncIoTransferHandle<CtxMarker, DhMarker>
+        where CtxMarker: Borrow<::context::Context<UnixAsyncIo>>+Clone+Debug,
+              DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
         fn cancel(&self) -> ::Result<()> {
-            let io_ref = &Borrow::<Context<UnixAsyncIo>>::borrow(&self.io.0).io;
+            let io_ref = &Borrow::<::context::Context<UnixAsyncIo>>::borrow(&self.io.0).io;
             let mut state = io_ref.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
             match state.running.get_mut(&self.id) {
                 Some(tr) => {
@@ -277,7 +282,7 @@ pub mod unix_async {
         transfer: *mut libusb_transfer,
     }
 
-    impl fmt::Debug for UnixAsyncIoTransfer {
+    impl Debug for UnixAsyncIoTransfer {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             write!(f, "UnixAsyncIoTransfer {{ id: {}, io: {:?}, buf: {:?}, callback: {}, transfer: {:?} }}",
                    self.id, self.io, self.buf,

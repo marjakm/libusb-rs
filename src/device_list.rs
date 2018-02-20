@@ -1,9 +1,5 @@
 use std::slice;
-
 use libusb::*;
-
-use io::IoType;
-use context::Context;
 use device::{self, Device};
 
 

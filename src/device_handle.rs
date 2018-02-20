@@ -1,15 +1,13 @@
 use std::mem;
-
 use bit_set::BitSet;
 use libc::c_int;
 use libusb::*;
-
-use io::IoType;
-use context::Context;
 use error;
+pub use self::async_api::DeviceHandleAsyncApi;
 
 
 /// A handle to an open USB device.
+#[derive(Debug)]
 pub struct DeviceHandle<IoHandle, CtxMarker> {
     ctx_marker: CtxMarker,
     io_handle: IoHandle,
@@ -111,11 +109,15 @@ impl<IoHandle, CtxMarker> DeviceHandle<IoHandle, CtxMarker> {
 }
 
 mod async_api {
+    use std::fmt;
     use std::slice;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::borrow::Borrow;
     use std::time::Duration;
     use libc::c_uint;
     use libusb::*;
-    use io::{IoType, AsyncIoType, AsyncIoTransferBuilderType};
+    use io::{AsyncIoType, AsyncIoTransferBuilderType};
     use super::DeviceHandle;
 
     macro_rules! fcsm {
@@ -125,32 +127,65 @@ mod async_api {
     macro_rules! tb {
         ($( $fn_nam:ident {$($var:ident : $typ:ty),*} $fill:ident  {$($v1:ident),*} {$($len:ident),*} {$($nip:ident),*} {$($znip:expr),*} {$($fcs:expr),*} )*) => {
 
-            impl<'dh, IoHandle, CtxMarker> DeviceHandle<IoHandle, CtxMarker>
-                where IoHandle: AsyncIoType<'dh, CtxMarker>
-            {$(
-                #[allow(non_snake_case)]
-                pub fn $fn_nam<F>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<F>, $( $var: $typ ),*) -> ::Result<<IoHandle as AsyncIoType<'dh, CtxMarker>>::TransferHandle>
-                    where     F: FnMut(<IoHandle as AsyncIoType<'dh, CtxMarker>>::TransferCallbackData) -> <IoHandle as AsyncIoType<'dh, CtxMarker>>::TransferCallbackResult,
-                              F: 'static,
-                {
-                    // debug!("BUF: {:?}", buf);
-                    let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
-                    let ar = self.io_handle.allocate(&self.handle, callback.map(|x| Box::new(x) as Box<_>), buf);
-                    // debug!("{:?}", ar);
-                    let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
-                    fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);
-                    unsafe { $fill(tr, self.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
-                    let res = ar.builder.submit(tr);
-                    if let Err(ref e) = res {
-                        error!("Error submitting: {:?} ; {:?} ; buf: {:?}",
-                            e,
-                            unsafe{&*tr},
-                            unsafe{ slice::from_raw_parts((*tr).buffer, ar.len as usize) }
-                        );
+            pub trait DeviceHandleAsyncApi<'dh, IoHandle, CtxMarker>
+                where IoHandle: 'dh+AsyncIoType<CtxMarker, Self::DhMarker>+Clone+fmt::Debug,
+                      CtxMarker: 'dh+Clone+fmt::Debug
+            {
+                type DhMarker: 'dh+Borrow<DeviceHandle<IoHandle, CtxMarker>>+Clone+fmt::Debug;
+
+                fn dh_marker(&'dh self) -> Self::DhMarker;
+
+                $(
+                    #[allow(non_snake_case)]
+                    fn $fn_nam<F>(&'dh self, buf: Vec<u8>, timeout: Duration, callback: Option<F>, $( $var: $typ ),*) -> ::Result<<IoHandle as AsyncIoType<CtxMarker, Self::DhMarker>>::TransferHandle>
+                        where     F: FnMut(<IoHandle as AsyncIoType<CtxMarker, Self::DhMarker>>::TransferCallbackData) -> <IoHandle as AsyncIoType<CtxMarker, Self::DhMarker>>::TransferCallbackResult,
+                                  F: 'static,
+                    {
+                        let dh_marker = self.dh_marker();
+                        let dh_ref = Borrow::<DeviceHandle<IoHandle, CtxMarker>>::borrow(&dh_marker);
+                        // debug!("BUF: {:?}", buf);
+                        let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
+                        let ar = dh_ref.io_handle.allocate(dh_marker.clone(), callback.map(|x| Box::new(x) as Box<_>), buf);
+                        // debug!("{:?}", ar);
+                        let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
+                        fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);
+                        unsafe { $fill(tr, dh_ref.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
+                        let res = ar.builder.submit(tr);
+                        if let Err(ref e) = res {
+                            error!("Error submitting: {:?} ; {:?} ; buf: {:?}",
+                                e,
+                                unsafe{&*tr},
+                                unsafe{ slice::from_raw_parts((*tr).buffer, ar.len as usize) }
+                            );
+                        }
+                        res
                     }
-                    res
-                }
-            )*}
+                )*
+            }
+
+            impl<'dh, IoHandle, CtxMarker> DeviceHandleAsyncApi<'dh, IoHandle, CtxMarker> for DeviceHandle<IoHandle, CtxMarker>
+                where IoHandle: 'dh+AsyncIoType<CtxMarker, &'dh Self>+Clone+fmt::Debug,
+                      CtxMarker: 'dh+Clone+fmt::Debug
+            {
+                type DhMarker = &'dh Self;
+                fn dh_marker(&'dh self) -> Self::DhMarker { self }
+            }
+
+            impl<'dh, IoHandle, CtxMarker> DeviceHandleAsyncApi<'dh, IoHandle, CtxMarker> for Rc<DeviceHandle<IoHandle, CtxMarker>>
+                where IoHandle: 'dh+AsyncIoType<CtxMarker, Self>+Clone+fmt::Debug,
+                      CtxMarker: 'dh+Clone+fmt::Debug
+            {
+                type DhMarker = Self;
+                fn dh_marker(&'dh self) -> Self::DhMarker { self.clone() }
+            }
+
+            impl<'dh, IoHandle, CtxMarker> DeviceHandleAsyncApi<'dh, IoHandle, CtxMarker> for Arc<DeviceHandle<IoHandle, CtxMarker>>
+                where IoHandle: 'dh+AsyncIoType<CtxMarker, Self>+Clone+fmt::Debug,
+                      CtxMarker: 'dh+Clone+fmt::Debug
+            {
+                type DhMarker = Self;
+                fn dh_marker(&'dh self) -> Self::DhMarker { self.clone() }
+            }
         }
     }
 
@@ -170,7 +205,7 @@ mod unix_async_io {
     use std::sync::mpsc::channel;
     use std::mem::size_of;
     use libusb::*;
-    use super::DeviceHandle;
+    use super::{DeviceHandle, DeviceHandleAsyncApi};
     use context::Context;
     use device_handle_sync_api::DeviceHandleSyncApi;
     use io::unix_async::{UnixAsyncIo, UnixAsyncIoHandle, UnixAsyncIoCallbackResult};
@@ -244,7 +279,7 @@ mod unix_async_io {
         }
     }
 
-    impl<'ctx, CtxMarker> DeviceHandleSyncApi for DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>
+    impl<'dh, CtxMarker> DeviceHandleSyncApi for DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>
         where CtxMarker: Borrow<Context<UnixAsyncIo>>+Clone+fmt::Debug
     {
         fn read_interrupt(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> ::Result<usize> {
