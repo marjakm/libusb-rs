@@ -110,7 +110,6 @@ impl<IoHandle, CtxMarker> DeviceHandle<IoHandle, CtxMarker> {
 
 mod async_api {
     use std::fmt;
-    use std::slice;
     use std::rc::Rc;
     use std::sync::Arc;
     use std::borrow::Borrow;
@@ -145,20 +144,12 @@ mod async_api {
                         let dh_ref = Borrow::<DeviceHandle<IoHandle, CtxMarker>>::borrow(&dh_marker);
                         // debug!("BUF: {:?}", buf);
                         let timeout_ms = (timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000) as c_uint;
-                        let ar = dh_ref.io_handle.allocate(dh_marker.clone(), callback.map(|x| Box::new(x) as Box<_>), buf);
-                        // debug!("{:?}", ar);
                         let tr = unsafe { libusb_alloc_transfer( $($nip),* $($znip),* ) };
+                        let ar = dh_ref.io_handle.allocate(tr, dh_marker.clone(), callback.map(|x| Box::new(x) as Box<_>), buf);
+                        // debug!("{:?}", ar);
                         fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);
                         unsafe { $fill(tr, dh_ref.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
-                        let res = ar.builder.submit(tr);
-                        if let Err(ref e) = res {
-                            error!("Error submitting: {:?} ; {:?} ; buf: {:?}",
-                                e,
-                                unsafe{&*tr},
-                                unsafe{ slice::from_raw_parts((*tr).buffer, ar.len as usize) }
-                            );
-                        }
-                        res
+                        ar.builder.submit()
                     }
                 )*
             }
