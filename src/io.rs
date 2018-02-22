@@ -113,6 +113,7 @@ pub mod unix_async {
     pub type DeviceHandle<CtxMarker> = ::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>;
 
     use std::fmt;
+    use std::ptr;
     use std::sync::Mutex;
     use std::borrow::Borrow;
     use std::process::abort;
@@ -120,6 +121,7 @@ pub mod unix_async {
     use std::collections::HashMap;
     use std::panic::catch_unwind;
     use mio::{Ready, Token};
+    use libc::{c_int, c_short, c_void};
     use libusb::*;
     use super::*;
 
@@ -146,7 +148,13 @@ pub mod unix_async {
                        supported, see http://libusb.sourceforge.net/api-1.0/group__poll.html \
                        for details")
             }
-            UnixAsyncIo {
+            unsafe { libusb_set_pollfd_notifiers(
+                ctx,
+                async_io_pollfd_added_function,
+                async_io_pollfd_removed_function,
+                ptr::null_mut()
+            ); }
+           UnixAsyncIo {
                 reg: Mutex::new(None),
                 state: Box::new(Mutex::new( UnixAsyncIoState {
                     next_id: 0,
@@ -172,28 +180,20 @@ pub mod unix_async {
 
         fn allocate(&self, transfer: *mut libusb_transfer, dh_marker: DhMarker, cb: Option<Box<FnMut(Self::TransferCallbackData) -> Self::TransferCallbackResult>>, buf: Vec<u8>) -> AsyncIoTransferAllocationResult<Self::TransferBuilder> {
             let io_ref = &Borrow::<::context::Context<UnixAsyncIo>>::borrow(&self.0).io;
-            let mut tr = io_ref.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
-            while tr.running.contains_key(&tr.next_id) {
-                tr.next_id += 1;
-            }
-            let id = tr.next_id;
-            tr.next_id += 1;
             let mut transfer = Box::new( UnixAsyncIoTransfer {
-                id: id,
+                id: 0,
                 state_mutex: &*io_ref.state as _,
                 buf: Some(buf),
                 callback: cb,
                 transfer: transfer,
             });
-            let res = AsyncIoTransferAllocationResult {
-                builder:       UnixAsyncIoTransferBuilder { io: self.clone(), id: id, dh_marker: dh_marker.clone()  },
+            AsyncIoTransferAllocationResult {
                 callback:      async_io_callback_function,
                 user_data_ptr: ((&mut *transfer as &mut UnixAsyncIoTransfer) as *mut UnixAsyncIoTransfer) as *mut c_void,
                 buf_ptr:       transfer.buf.as_mut().unwrap().as_mut_ptr(),
                 len:           transfer.buf.as_ref().unwrap().len() as i32,
-            };
-            tr.running.insert(id, transfer);
-            res
+                builder:       UnixAsyncIoTransferBuilder { io: self.clone(), dh_marker: dh_marker.clone(), transfer: transfer },
+            }
         }
     }
 
@@ -203,8 +203,8 @@ pub mod unix_async {
               DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
         io: UnixAsyncIoHandle<CtxMarker>,
-        id: usize,
         dh_marker: DhMarker,
+        transfer: Box<UnixAsyncIoTransfer>,
     }
 
     impl<CtxMarker, DhMarker> AsyncIoTransferBuilderType for UnixAsyncIoTransferBuilder<CtxMarker, DhMarker>
@@ -213,27 +213,30 @@ pub mod unix_async {
     {
         type TransferHandle = UnixAsyncIoTransferHandle<CtxMarker, DhMarker>;
 
-        fn submit(self) -> ::Result<Self::TransferHandle> {
-            {
+        fn submit(mut self) -> ::Result<Self::TransferHandle> {
+            let oid = {
                 let io_ref = &Borrow::<::context::Context<UnixAsyncIo>>::borrow(&self.io.0).io;
+                debug!("UnixAsyncIoTransferBuilder locking state mutex");
                 let mut state = io_ref.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
-                let res = match state.running.get_mut(&self.id) {
-                    Some(tr) => match unsafe { libusb_submit_transfer(tr.transfer) } {
-                            0 => Ok(()),
-                            err => Err(::error::from_libusb(err)),
-                    },
-                    None => panic!("Should not happen: TransferBuilder id has no match in running state")
-                };
-                if let Err(e) = res {
-                    if let Some(tr) = state.running.remove(&self.id) {
-                        error!("Error submitting: {:?} ; {:?} ; buf: {:?}",
-                            &e, unsafe{&*tr.transfer}, tr.buf
-                        );
-                    };
-                    return Err(e)
+                debug!("UnixAsyncIoTransferBuilder locked state mutex");
+                while state.running.contains_key(&state.next_id) { state.next_id += 1; }
+                let id = state.next_id;
+                state.next_id += 1;
+                self.transfer.id = id;
+                // it should be safe to submit before inserting into state.running, because
+                // the callback acquires state mutex as one of the first things and
+                // this function has the mutex currently, so it will finish before
+                // the callback can access state.running
+                match unsafe { libusb_submit_transfer(self.transfer.transfer) } {
+                    0 => { state.running.insert(id, self.transfer); id },
+                    err => {
+                        let e = ::error::from_libusb(err);
+                        error!("Error submitting: {:?} ; {:?}", &e, self.transfer );
+                        return Err(e)
+                    }
                 }
-            }
-            Ok(UnixAsyncIoTransferHandle { io: self.io, id: self.id, dh_marker: self.dh_marker })
+            };
+            Ok(UnixAsyncIoTransferHandle { io: self.io, id: oid, dh_marker: self.dh_marker })
         }
     }
 
@@ -253,7 +256,9 @@ pub mod unix_async {
     {
         fn cancel(&self) -> ::Result<()> {
             let io_ref = &Borrow::<::context::Context<UnixAsyncIo>>::borrow(&self.io.0).io;
+            debug!("UnixAsyncIoTransferHandle locking state mutex");
             let mut state = io_ref.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
+            debug!("UnixAsyncIoTransferHandle locked state mutex");
             match state.running.get_mut(&self.id) {
                 Some(tr) => Ok(try_unsafe!(libusb_cancel_transfer(tr.transfer))),
                 None => Ok(())
@@ -266,8 +271,11 @@ pub mod unix_async {
               DhMarker: Borrow<::device_handle::DeviceHandle<UnixAsyncIoHandle<CtxMarker>, CtxMarker>>+Clone+Debug,
     {
         fn drop(&mut self) {
-            if let Err(e) = self.cancel() {
-                error!("Error '{:?}' when canceling transfer '{:?}'", e, self)
+            debug!("Drop UnixAsyncIoTransferHandle - cancel transfer id {:?}", self.id);
+            match self.cancel() {
+                Ok(()) => {},
+                Err(::Error::NotFound) => {}, // Allready canceled, doesn't matter
+                Err(e) => error!("Error '{:?}' when canceling transfer id '{:?}'", e, self.id)
             }
         }
     }
@@ -303,6 +311,7 @@ pub mod unix_async {
 
     impl Drop for UnixAsyncIoTransfer {
         fn drop(&mut self) {
+            debug!("Drop UnixAsyncIoTransfer - free transfer id {:?} with ptr {:?}", self.id, self.transfer);
             unsafe{ libusb_free_transfer(self.transfer) };
         }
     }
@@ -317,16 +326,41 @@ pub mod unix_async {
         }
     }
 
+    extern "C" fn async_io_pollfd_added_function(fd: c_int, events: c_short, user_data: *mut c_void) {
+        let res = catch_unwind(|| {
+            debug!("async_io_pollfd_added_function: fd: {}, events: {}, user_data: {:?}", fd, events, user_data);
+        });
+        if let Err(e) = res {
+            println!("Aborting: Panic in async_io_pollfd_added_function: {:?}", e);
+            // error!("Aborting: Panic in async_io_pollfd_added_function: {:?}", e);
+            abort()
+        };
+    }
+
+    extern "C" fn async_io_pollfd_removed_function(fd: c_int, user_data: *mut c_void) {
+        let res = catch_unwind(|| {
+            debug!("async_io_pollfd_removed_function: fd: {}, user_data: {:?}", fd, user_data);
+        });
+        if let Err(e) = res {
+            println!("Aborting: Panic in async_io_pollfd_removed_function: {:?}", e);
+            // error!("Aborting: Panic in async_io_pollfd_added_function: {:?}", e);
+            abort()
+        };
+    }
+
     extern "C" fn async_io_callback_function(transfer_ptr: *mut libusb_transfer) {
         // It is currently undefined behavior to unwind from Rust code into foreign code
         let res = catch_unwind(|| {
+            debug!("async_io_callback_function: {:?}", transfer_ptr);
             if transfer_ptr.is_null() { panic!("async_io_callback_function got null ptr for transfer") }
             let tr = unsafe { &mut *transfer_ptr };
             if tr.user_data.is_null() { panic!("async_io_callback_function got null ptr for user_data") }
             let aiotr = unsafe { &mut *(tr.user_data as *mut UnixAsyncIoTransfer) };
             if aiotr.state_mutex.is_null() { panic!("async_io_callback_function got null ptr for state_mutex") }
             let state_mutex = unsafe { &*aiotr.state_mutex };
+            debug!("async_io_callback_function locking state mutex");
             let mut state = state_mutex.lock().expect("async_io_callback_function could not unlock UnixAsyncIo state mutex");
+            debug!("async_io_callback_function locked state mutex");
             let cb_data = UnixAsyncIoCallbackData{
                 buf: match aiotr.buf.take() {
                     Some(b) => b,
@@ -346,7 +380,10 @@ pub mod unix_async {
                             tr.buffer = aiotr.buf.as_mut().unwrap().as_mut_ptr();
                             tr.length = aiotr.buf.as_ref().unwrap().len() as i32;
                             match unsafe{ libusb_submit_transfer(transfer_ptr) } {
-                                0 => return,
+                                0 => {
+                                    debug!("async_io_callback_function done, resubmitting");
+                                    return
+                                },
                                 e => UnixAsyncIoTransferResult::Err(::error::from_libusb(e))
                             }
                         },
@@ -357,12 +394,11 @@ pub mod unix_async {
             // Transfer is done if this point is reached
             state.running.remove(&aiotr.id);
             state.complete.push((aiotr.id, atrr));
+            debug!("async_io_callback_function done");
         });
         if let Err(e) = res {
-            error!("Panic in async_io_callback_function: {:?}", e);
-            println!("Panic in async_io_callback_function: {:?}", e);
-            error!("Aborting");
-            println!("Aborting");
+            println!("Aborting: Panic in async_io_callback_function: {:?}", e);
+            // error!("Aborting: Panic in async_io_callback_function: {:?}", e);
             abort()
         };
     }

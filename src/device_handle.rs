@@ -18,12 +18,14 @@ pub struct DeviceHandle<IoHandle, CtxMarker> {
 impl<IoHandle, CtxMarker> Drop for DeviceHandle<IoHandle, CtxMarker> {
     /// Closes the device.
     fn drop(&mut self) {
+        trace!("Before close DeviceHandle");
         unsafe {
             for iface in self.interfaces.iter() {
                 libusb_release_interface(self.handle, iface as c_int);
             }
             libusb_close(self.handle);
         }
+        trace!("After close DeviceHandle");
     }
 }
 
@@ -149,7 +151,9 @@ mod async_api {
                         // debug!("{:?}", ar);
                         fcsm!($($fcs),* ; ar.buf_ptr, $($var),*);
                         unsafe { $fill(tr, dh_ref.handle, $($v1,)* ar.buf_ptr, $(ar.$len,)* $($nip,)* ar.callback, ar.user_data_ptr, timeout_ms); }
-                        ar.builder.submit()
+                        let res = ar.builder.submit();
+                        debug!(concat!(stringify!($fn_nam), " submitted {}"), res.is_ok());
+                        res
                     }
                 )*
             }

@@ -175,35 +175,69 @@ mod unix_async_io {
             match (*ir).as_mut() {
                 None => return Err("Register in Poll before calling handle".into()),
                 Some(ofds) => {
-                    let tv = timeval { tv_sec: 0, tv_usec: 0 };
-                    let res = match unsafe { libusb_handle_events_locked(self.context, &tv as *const timeval) } {
-                        0 => {
-                            let mut tr = self.io.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
-                            ::std::mem::swap(&mut tr.complete, complete);
-                            Ok(())
-                        },
-                        e => Err(from_libusb(e))
-                    };
                     if unsafe { libusb_event_handling_ok(self.context) } == 0 {
+                        debug!("Handler event handling not ok");
                         unsafe { libusb_unlock_events(self.context) };
                         self.spin_until_locked_and_ok_to_handle_events();
                     }
-                    let fds = self.get_pollfd_list();
-                    if ofds.1 != fds {
-                        for &(ref fd, _) in ofds.1.iter() {
-                            poll.deregister(&EventedFd(fd)).map_err(|e| e.to_string())?;
+                    let tv = timeval { tv_sec: 0, tv_usec: 0 };
+                    debug!("Handler before libusb_handle_events_locked");
+                    let hres = unsafe { libusb_handle_events_locked(self.context, &tv as *const timeval) };
+                    debug!("Handler libusb_handle_events_locked done with {}", hres);
+                    let res = match hres {
+                        0 => {
+                            debug!("Handler locking io.state");
+                            let mut state = self.io.state.lock().expect("Could not unlock UnixAsyncIo state mutex");
+                            debug!("Handler locked io.state");
+                            ::std::mem::swap(&mut state.complete, complete);
+                            debug!("Handler swapped");
+                            Ok(())
+                        },
+                        e => {
+                            let err = from_libusb(e);
+                            error!("Handler error: {:?}", err);
+                            Err(err)
                         }
-                        for &(ref fd, ref rdy) in fds.iter() {
-                            poll.register(&EventedFd(fd), ofds.0, *rdy, PollOpt::level()).map_err(|e| e.to_string())?;
+                    };
+                    'pollfd: for _ in 0..20 {
+                        debug!("Handler is handling ok?");
+                        if unsafe { libusb_event_handling_ok(self.context) } == 0 {
+                            debug!("Handler event handling not ok 2");
+                            unsafe { libusb_unlock_events(self.context) };
+                            self.spin_until_locked_and_ok_to_handle_events();
                         }
+                        debug!("Handler handling is ok");
+                        let fds = self.get_pollfd_list();
+                        if ofds.1 != fds {
+                            for &(ref fd, _) in ofds.1.iter() {
+                                match poll.deregister(&EventedFd(fd)) {
+                                    Ok(..) => {},
+                                    Err(e) => warn!("Handler could not deregister {:?}, ignoring error: {:?}", fd, e),
+                                }
+                            }
+                            ofds.1.clear();
+                            for &(ref fd, ref rdy) in fds.iter() {
+                                match poll.register(&EventedFd(fd), ofds.0, *rdy, PollOpt::level()) {
+                                    Ok(..) => {},
+                                    Err(e) => {
+                                        warn!("Handler could not register {:?}, wait 10ms, get new list and try again, error: {:?}", fd, e);
+                                        sleep(Duration::from_millis(10));
+                                        continue 'pollfd
+                                    }
+                                }
+                            }
+                        }
+                        ofds.1 = fds;
+                        debug!("Handler done");
+                        return res
                     }
-                    ofds.1 = fds;
-                    res
+                    panic!("Handler could not get new pollfd list")
                 }
             }
         }
 
         fn get_pollfd_list(&self) -> Vec<(RawFd, Ready)> {
+            debug!("Handler get_pollfd_list start");
             let pfdl = unsafe { libusb_get_pollfds(self.context) };
             let mut v = Vec::new();
             let sl: &[*mut libusb_pollfd] = unsafe { slice::from_raw_parts(pfdl, 1024) };
@@ -218,23 +252,24 @@ mod unix_async_io {
             }
             unsafe { libusb_free_pollfds(pfdl) };
             v.sort();
-            debug!("get_pollfd_list: {:?}", v);
+            debug!("Handler get_pollfd_list: {:?}", v);
             v
         }
 
         fn spin_until_locked_and_ok_to_handle_events(&self) {
-            'retry: loop {
+            loop {
                 if unsafe { libusb_try_lock_events(self.context) } == 0 {
                     // got lock
                     if unsafe { libusb_event_handling_ok(self.context) } == 0 {
                         unsafe { libusb_unlock_events(self.context) };
-                        warn!("libusb_event_handling_ok returned not ok, busy wait until ok (with 10ms sleep)");
+                        warn!("Handler libusb_event_handling_ok returned not ok, busy wait until ok (with 10ms sleep)");
                         sleep(Duration::from_millis(10));
-                        continue 'retry;
+                    } else {
+                        debug!("Handler libusb_event_handling_ok returned ok");
+                        return
                     }
-                    break
                 } else {
-                    warn!("could not get events lock with libusb_try_lock_events, busy wait until ok (with 10ms sleep)");
+                    warn!("Handler could not get events lock with libusb_try_lock_events, busy wait until ok (with 10ms sleep)");
                     sleep(Duration::from_millis(10));
                 }
             }
